@@ -11,11 +11,14 @@ import {
   type MarketSpec,
 } from '../lib/market';
 import type { Market } from '../data/types';
+import type { PathPoint } from '../lib/pathfit';
 import { buildModel, lifetimeExtremes, type Leg, type Model, type Side } from '../lib/strategy';
 
-export type Tool = 'pointer' | 'buyC' | 'sellC' | 'buyP' | 'sellP';
+export type Tool = 'pointer' | 'draw' | LegTool;
+export type LegTool = 'buyC' | 'sellC' | 'buyP' | 'sellP';
+const isLegTool = (t: Tool): t is LegTool => t !== 'pointer' && t !== 'draw';
 
-export const TOOL_LEG: Record<Exclude<Tool, 'pointer'>, { type: OptType; side: Side; label: string }> = {
+export const TOOL_LEG: Record<LegTool, { type: OptType; side: Side; label: string }> = {
   buyC: { type: 'C', side: 1, label: 'Buy Call' },
   sellC: { type: 'C', side: -1, label: 'Sell Call' },
   buyP: { type: 'P', side: 1, label: 'Buy Put' },
@@ -53,6 +56,10 @@ interface Props {
   onMoveGroup: (moves: { id: string; strike: number; expiry: number }[]) => void;
   onSelect: (id: string | null) => void;
   onRemove: (id: string) => void;
+  /** A price path drawn with the Draw tool (on release). */
+  onDraw: (path: PathPoint[]) => void;
+  /** The last drawn path, shown dashed while its fitted position is on the chart. */
+  guide: PathPoint[] | null;
 }
 
 const C = {
@@ -137,7 +144,9 @@ const GROUP_ID = '__group';
 type LegPos = { id: string; strike: number; expiry: number };
 
 interface DragState {
-  kind: 'leg' | 'axis' | 'pan' | 'group';
+  kind: 'leg' | 'axis' | 'pan' | 'group' | 'draw';
+  /** Draw tool: the path so far, as (time, price). */
+  path?: PathPoint[];
   /** Group drag: the legs as they were when grabbed, where each would land now, and where each is drawn. */
   groupFrom?: LegPos[];
   groupTo?: LegPos[];
@@ -537,7 +546,7 @@ export function Chart(props: Props) {
     }
 
     // ---- Expiry columns ----
-    const snap = hover && tool !== 'pointer' && !drag ? snapAt(g, hover.x, hover.y) : null;
+    const snap = hover && isLegTool(tool) && !drag ? snapAt(g, hover.x, hover.y) : null;
     const activeExpiry = dragLeg?.expiry ?? snap?.expiry;
     const legExpiries = new Set(legs.map((l) => l.expiry));
     const visible = expiries.filter((e) => tToX(e.ts) <= plotR);
@@ -1142,6 +1151,33 @@ export function Chart(props: Props) {
       else if (downProfit) tag('down', 'profit', `PROFIT UP TO ${signedUsd(atZero, 0)}`, `profits below {edge}, best if ${spec.asset} hits 0`);
     }
 
+    // ---- Drawn path: the one being drawn, or the guide for the fitted position ----
+    const drawnPath = drag?.kind === 'draw' ? drag.path! : p.guide;
+    if (drawnPath && drawnPath.length >= 2) {
+      const live = drag?.kind === 'draw';
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(nowX, plotT, plotR - nowX, plotB - plotT);
+      ctx.clip();
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      const trace = () => {
+        ctx.beginPath();
+        drawnPath.forEach((q, i) => (i ? ctx.lineTo(tToX(q.t), pToY(q.p)) : ctx.moveTo(tToX(q.t), pToY(q.p))));
+      };
+      // A dark casing first, so the line reads on both green and red.
+      trace();
+      ctx.strokeStyle = 'rgba(12,15,20,0.7)';
+      ctx.lineWidth = live ? 5 : 4;
+      ctx.stroke();
+      trace();
+      ctx.strokeStyle = live ? C.text : 'rgba(227,231,238,0.85)';
+      ctx.lineWidth = live ? 2.5 : 1.75;
+      if (!live) ctx.setLineDash([6, 4]);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     // ---- Leg markers ----
     const markers: Marker[] = [];
     const editableIds = new Set(editableLegs.map((l) => l.id));
@@ -1295,7 +1331,7 @@ export function Chart(props: Props) {
     // ---- Ghost for the active tool ----
     const overMarker = hover && markers.find((m) => hover.x >= m.x && hover.x <= m.x + m.w && hover.y >= m.y && hover.y <= m.y + m.h);
     let ghostInfo: string[] | null = null;
-    if (snap && tool !== 'pointer' && !overMarker) {
+    if (snap && isLegTool(tool) && !overMarker) {
       const tl = TOOL_LEG[tool];
       const ghost: Leg = { id: '__ghost', asset: spec.asset, type: tl.type, side: tl.side, strike: snap.strike, expiry: snap.expiry, qty: 1 };
       drawLeg(ghost, true);
@@ -1404,7 +1440,7 @@ export function Chart(props: Props) {
       if (overMarker) lines.push({ text: overMarker.label, bold: true, color: overMarker.color });
       if (hover.x > nowX) {
         if (ghostInfo) {
-          lines.push({ text: ghostInfo[0], bold: true, color: TOOL_LEG[tool as Exclude<Tool, 'pointer'>].side > 0 ? C.long : C.short });
+          lines.push({ text: ghostInfo[0], bold: true, color: TOOL_LEG[tool as LegTool].side > 0 ? C.long : C.short });
           lines.push({ text: ghostInfo[1] });
         }
         lines.push({ text: `${fmtTime(ht, true)} UTC · ${fmtPrice(hp, hp < 100 ? 2 : 0)}`, color: C.muted });
@@ -1446,11 +1482,12 @@ export function Chart(props: Props) {
 
     // Cursor.
     let cursor = 'default';
-    if (drag) cursor = drag.kind === 'axis' ? 'ns-resize' : drag.kind === 'group' ? 'move' : 'grabbing';
+    if (drag) cursor = drag.kind === 'axis' ? 'ns-resize' : drag.kind === 'group' ? 'move' : drag.kind === 'draw' ? 'crosshair' : 'grabbing';
     else if (tool === 'pointer' && hover && hover.x < plotR) cursor = overMarker ? 'grab' : 'move';
     else if (overMarker) cursor = 'grab';
     else if (hover && hover.x > plotR + PW) cursor = 'ns-resize';
-    else if (snap && tool !== 'pointer') cursor = 'crosshair';
+    else if (snap && isLegTool(tool)) cursor = 'crosshair';
+    else if (tool === 'draw' && hover && hover.x > nowX && hover.x < plotR) cursor = 'crosshair';
     canvas.style.cursor = cursor;
 
     const testWin = window as unknown as { __TICKET_TEST__?: boolean; __chart?: unknown };
@@ -1468,6 +1505,7 @@ export function Chart(props: Props) {
         yToP,
         legs: legsForPnl.map((l) => ({ id: l.id, type: l.type, side: l.side, strike: l.strike, expiry: l.expiry, qty: l.qty, entry: l.entry })),
         markers: markers.map((m) => ({ id: m.id, x: m.x + m.w / 2, y: m.y + m.h / 2 })),
+        guide: p.guide,
         heat: heat && maxAbs > 1e-9 ? { x0: heat.x0, cell: heat.cell, cols: heat.cols, rows: heat.rows, contour: heat.contour } : null,
         pnl: pnlFn,
         draw,
@@ -1632,6 +1670,8 @@ export function Chart(props: Props) {
       const x = t.clientX - r.left;
       const y = t.clientY - r.top;
       if (x > g.plotR + g.profileW || hitMarker(x, y, TOUCH_SLACK)) e.preventDefault();
+      // Drawing a path: the finger draws instead of scrolling the page.
+      else if (propsRef.current.tool === 'draw' && x > g.nowX && x < g.plotR) e.preventDefault();
     };
     const onTouchMove = (e: TouchEvent) => {
       const pinch = pinchRef.current;
@@ -1693,6 +1733,12 @@ export function Chart(props: Props) {
       draw();
       return;
     }
+    if (!m && p.tool === 'draw' && x > g.nowX && x < g.plotR && y > g.plotT && y < g.plotB) {
+      dragRef.current = { kind: 'draw', startX: x, startY: y, moved: false, path: [{ t: g.xToT(x), p: g.yToP(y) }] };
+      (e.target as Element).setPointerCapture(e.pointerId);
+      draw();
+      return;
+    }
     if (m) {
       const leg = p.editableLegs.find((l) => l.id === m.id)!;
       dragRef.current = { kind: 'leg', id: m.id, startX: x, startY: y, moved: false, strike: leg.strike, expiry: leg.expiry, grabDX: m.x + m.w / 2 - x, grabDY: m.y + m.h / 2 - y };
@@ -1732,7 +1778,7 @@ export function Chart(props: Props) {
   /** Click / tap on empty chart: place a leg with the active tool, or clear the selection. */
   const act = (g: Geom, x: number, y: number) => {
     const p = propsRef.current;
-    if (p.tool === 'pointer') {
+    if (!isLegTool(p.tool)) {
       p.onSelect(null);
       return;
     }
@@ -1785,6 +1831,14 @@ export function Chart(props: Props) {
         const p = propsRef.current;
         lastMoveRef.current = performance.now();
         p.onViewChange({ ...p.view, yShift: d.startShift! + ((y - d.startY) / (g.plotB - g.plotT)) * p.view.yZoom });
+      } else if (d.kind === 'draw') {
+        // The path runs forward in time: moving back left redraws from there.
+        const cx = Math.max(g.nowX + 1, Math.min(g.plotR - 1, x));
+        const cy = Math.max(g.plotT + 1, Math.min(g.plotB - 1, y));
+        const t = g.xToT(cx);
+        const path = d.path!;
+        while (path.length > 1 && path[path.length - 1].t >= t) path.pop();
+        if (t > path[path.length - 1].t) path.push({ t, p: g.yToP(cy) });
       } else if (d.kind === 'group') {
         if (d.moved) {
           const p = propsRef.current;
@@ -1844,6 +1898,12 @@ export function Chart(props: Props) {
         glide();
         p.onMove(d.id!, d.strike!, d.expiry!);
       } else p.onSelect(d.id!);
+    }
+    if (d?.kind === 'draw' && d.path) {
+      const g = geomRef.current;
+      const path = d.path;
+      // Ignore a click or a tiny scribble: a path needs some length in time.
+      if (g && path.length >= 2 && g.tToX(path[path.length - 1].t) - g.tToX(path[0].t) > 12) propsRef.current.onDraw(path);
     }
     if (d?.kind === 'group' && d.moved && d.groupTo && d.groupLive) {
       const live = new Map(d.groupLive.map((l) => [l.id, l]));

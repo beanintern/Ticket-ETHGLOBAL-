@@ -4,11 +4,12 @@ import { forgetSessionKey, hasMetaMask, metaMaskSigner, registerSessionKey, save
 import { instrumentName, legOrders, type OrderMode } from './account/orders';
 import type { Trading } from './components/DeriveReview';
 import { AccountButton, AccountPanel } from './components/AccountPanel';
-import { Chart, TOOL_LEG, type ChartView, type Tool } from './components/Chart';
+import { Chart, TOOL_LEG, type ChartView, type LegTool, type Tool } from './components/Chart';
+import { fitPath, payoffAlongPath, type PathPoint } from './lib/pathfit';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
 import { bsPrice } from './lib/bs';
-import { price as fmtPrice, signed } from './lib/format';
+import { price as fmtPrice, signed, signedUsd } from './lib/format';
 import { createSource, pickSourceKind } from './data';
 import type { Market, MarketSource } from './data/types';
 import { DAY, HOUR, MARKETS, YEAR, priceAt, type Asset } from './lib/market';
@@ -410,6 +411,29 @@ export default function App() {
     (id: string, strike: number, expiry: number) => setLegs((legs) => legs.map((l) => (l.id === id ? { ...l, strike, expiry } : l))),
     [setLegs],
   );
+  // Draw tool: the last drawn path per market, shown as a guide while its position is on the chart.
+  const [guides, setGuides] = useState<Partial<Record<Asset, PathPoint[]>>>({});
+  const onDraw = (path: PathPoint[]) => {
+    const fit = fitPath(path, market, asset, now);
+    if (!fit.legs.length) {
+      setToast('Draw further right: the path needs to reach a listed expiry.');
+      return;
+    }
+    setFocus({ kind: 'builder' });
+    setTab('build');
+    setSelectedLegId(null);
+    setLegs(() => fit.legs);
+    setGuides((g) => ({ ...g, [asset]: path }));
+    const cost = buildModel(fit.legs, market, now).cost;
+    const n = fit.targets.length;
+    setToast(
+      `${n} butterfl${n > 1 ? 'ies' : 'y'} along your path: ${signedUsd(payoffAlongPath(fit.legs, path, cost), 0)} if ${asset} follows it. Undo with ↶`,
+    );
+  };
+  // Clearing the ticket drops its guide, so an old path never hangs over a new position.
+  useEffect(() => {
+    if (!builderLegs.length && guides[asset]) setGuides((g) => ({ ...g, [asset]: undefined }));
+  }, [builderLegs.length, guides, asset]);
   const onMoveGroup = useCallback(
     (moves: { id: string; strike: number; expiry: number }[]) => {
       const to = new Map(moves.map((m) => [m.id, m]));
@@ -432,7 +456,7 @@ export default function App() {
         }
         return;
       }
-      const map: Record<string, Tool> = { '1': 'buyC', '2': 'sellC', '3': 'buyP', '4': 'sellP', v: 'pointer', Escape: 'pointer' };
+      const map: Record<string, Tool> = { '1': 'buyC', '2': 'sellC', '3': 'buyP', '4': 'sellP', '5': 'draw', v: 'pointer', Escape: 'pointer' };
       if (map[e.key]) setTool(map[e.key]);
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedLegId) {
         onRemove(selectedLegId);
@@ -628,7 +652,7 @@ export default function App() {
                   <path d="M2 1.5l9 5-4 1-1.5 4z" fill="currentColor" />
                 </svg>
               </button>
-              {(Object.keys(TOOL_LEG) as Exclude<Tool, 'pointer'>[]).map((t, i) => {
+              {(Object.keys(TOOL_LEG) as LegTool[]).map((t, i) => {
                 const tl = TOOL_LEG[t];
                 return (
                   <button
@@ -643,6 +667,18 @@ export default function App() {
                   </button>
                 );
               })}
+              <button
+                className={`tool tool-draw ${tool === 'draw' ? 'is-active' : ''}`}
+                onClick={() => setTool('draw')}
+                aria-label="Draw path"
+                title="Draw a price path: the ticket becomes a position that pays off along it (5)"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                  <path d="M1.5 11c2-5 3.5-6.5 5-4s3 1.5 5.5-4.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <span className="wide-only">Draw path</span>
+                <kbd>5</kbd>
+              </button>
             </div>
             <div className="history" role="group" aria-label="History">
               <button className="tool icon" onClick={() => stepHistory('undo')} disabled={!canUndo} title="Undo (Ctrl/⌘ Z)" aria-label="Undo">
@@ -714,6 +750,8 @@ export default function App() {
             onAdd={onAdd}
             onMove={onMove}
             onMoveGroup={onMoveGroup}
+            onDraw={onDraw}
+            guide={!focusedPosition && builderLegs.length ? (guides[asset] ?? null) : null}
             onSelect={setSelectedLegId}
             onRemove={(id) => {
               const leg = builderLegs.find((l) => l.id === id);

@@ -140,6 +140,7 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .tool.is-active { color: var(--text); background: var(--panel-2); border-color: var(--text); }
 .tool-long.is-active { border-color: var(--long); box-shadow: inset 0 -2px 0 var(--long); }
 .tool-short.is-active { border-color: var(--short); box-shadow: inset 0 -2px 0 var(--short); }
+.tool-draw.is-active { border-color: var(--text); box-shadow: inset 0 -2px 0 var(--text); }
 .tool kbd { font: 10px var(--mono); color: var(--dim); border: 1px solid var(--line-2); border-radius: 3px; padding: 0 4px; }
 .glyph { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; }
 .tool-long .glyph-C { border-bottom: 7px solid var(--long); }
@@ -341,9 +342,9 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
   .market span:last-child { font-size: 11px; }
 
   .chart-toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 16px; }
-  .tools { flex: 1 1 100%; flex-wrap: nowrap; gap: 4px; }
-  .tools .tool { flex: 1 1 auto; justify-content: center; height: 34px; padding: 0 5px; gap: 5px; font-size: 11.5px; white-space: nowrap; }
-  .tools .tool:first-child { flex: 0 0 34px; }
+  .tools { flex: 1 1 100%; flex-wrap: nowrap; gap: 3px; min-width: 0; }
+  .tools .tool { flex: 1 1 auto; min-width: 0; justify-content: center; height: 34px; padding: 0 4px; gap: 4px; font-size: 11.5px; white-space: nowrap; }
+  .tools .tool:first-child, .tools .tool-draw { flex: 0 0 34px; }
   .history { margin-right: 0; }
   .history .tool { width: 34px; height: 34px; justify-content: center; padding: 0; }
   .chart-controls { flex: 1; justify-content: space-between; gap: 8px; flex-wrap: nowrap; }
@@ -356,6 +357,8 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 
 @media (max-width: 380px) {
   .tools .glyph { display: none; }
+  .tools .tool { font-size: 10.5px; padding: 0 3px; }
+  .tools .tool:first-child, .tools .tool-draw { flex-basis: 30px; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }

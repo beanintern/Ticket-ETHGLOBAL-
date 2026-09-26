@@ -63,6 +63,7 @@ N=200 SEED=7 npm run check:chart
 SEED=7 ONLY=113 npm run check:chart   # replay one case
 npm run check:live    # the live Derive layer against the real exchange
 NETWORK=testnet npm run check:live
+npm run check:draw    # draws paths with the mouse and checks the position built from each
 ```
 
 - `check:chart` checks named structures (spreads, condors, butterflies, calendars, single
@@ -73,6 +74,10 @@ NETWORK=testnet npm run check:live
   right up to each expiry (every contour point within 3 px of the outline, and no outline off the
   contour). The demo market is seeded from `SEED` and frozen (`?freeze=1`), so a run replays
   exactly; `ONLY=n` re-runs one case. Failures are screenshotted to `check-chart-failures/`.
+- `check:draw` draws price paths on the chart with the mouse and checks that each builds call
+  butterflies on listed strikes and expiries, that at each butterfly's expiry the legs still
+  alive then pay most within half a wing of the path (independent pricing), that the path is
+  shown as a guide, and that undo restores the previous ticket.
 - `check:live` loads real Derive data with the app's own code and checks expiries, strikes,
   the index and history, that our pricing reproduces Derive's mark prices (within 0.5%), and
   that IV for unlisted strikes is interpolated sensibly.
@@ -96,6 +101,13 @@ NETWORK=testnet npm run check:live
   profit, greeks and an editable leg list. Presets for common structures.
 - **Positions tab**. Paper fills with live P&L, a P&L sparkline since entry, progress toward
   max profit, and close. Stored per data source in the browser.
+- **Draw path** (`src/lib/pathfit.ts`). Pick the Draw tool (`5`) and draw where you think price
+  goes, left to right. On release the ticket becomes a position that pays off along that path:
+  on each listed expiry the path spans (up to six, spread evenly, plus the next one if the path
+  runs past the last), a call butterfly (+1 / −2 / +1, equal wings on listed strikes) is centred
+  on the path's price at that date, with wings about half the expected move by then. The path
+  stays on the chart as a dashed guide, the toast says what the position makes if price follows
+  it, and undo restores the previous ticket. Legs can then be dragged like any others.
 - **Compounding positions**. Tick positions in the Positions tab to add them to the chart
   together, on top of whatever is on the Build tab, so you can see a new trade against what you
   already hold. A Combined box shows their joint P&L, delta and max profit/loss. The toolbar's
@@ -104,7 +116,7 @@ NETWORK=testnet npm run check:live
   live data, each option's IV is the one that reproduces Derive's mark, so today's P&L matches
   exchange prices and the map projects forward from there.
 
-Keys: `1`–`4` pick Buy Call / Sell Call / Buy Put / Sell Put, `V` or `Esc` for the pointer,
+Keys: `1`–`4` pick Buy Call / Sell Call / Buy Put / Sell Put, `5` Draw path, `V` or `Esc` for the pointer,
 `Delete` removes the selected leg, `Ctrl/⌘ Z` undo. Scroll zooms time; shift-scroll or drag the
 price axis for price; drag the chart to pan; double-click to reset.
 
