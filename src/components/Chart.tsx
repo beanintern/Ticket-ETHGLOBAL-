@@ -640,7 +640,7 @@ export function Chart(props: Props) {
       // Outline where the P&L is actually within ZONE_FRAC of its max (or max loss), traced on the
       // map itself. Max profit/loss is only reached at expiry, so this is a wedge that widens
       // toward the expiry, not a box starting at "now".
-      const drawZone = (kind: 'profit' | 'loss', v: number, tAt: number) => {
+      const drawZone = (kind: 'profit' | 'loss', v: number, tAt: number, sAt: number) => {
         const heat = heatRef.current;
         if (!heat) return;
         const { vals, cols, rows, cell: hc, x0 } = heat;
@@ -680,7 +680,7 @@ export function Chart(props: Props) {
         const cx = (c: number) => x0 + (c + 0.5) * hc;
         // Runs where the extreme is reached (for the caption and compact marker), and at the last
         // expiry (the outline's closing edge).
-        const atExpiry = colRuns(cRef);
+        let atExpiry = colRuns(cRef);
         const atEnd = colRuns(cEx);
         dbg.zones.push({ kind, v, level, runs: atExpiry, t: xToT(cx(cRef)), cell: hc });
 
@@ -697,25 +697,34 @@ export function Chart(props: Props) {
             }
         const zoneW = (cEx - firstCol + 1) * hc;
         const areaPx = cells * hc * hc;
-        const compact = cells > 0 && (zoneW < 40 || areaPx / zoneW < 12 || areaPx < 4000);
+        let compact = cells > 0 && (zoneW < 40 || areaPx / zoneW < 12 || areaPx < 4000);
+        // A sharp peak (e.g. a butterfly at expiry) can be too narrow for the map's grid to show at
+        // all: mark the exact point instead, if it's on screen.
+        const yAt = pToY(sAt);
+        if (!atExpiry.length && yAt > plotT && yAt < plotB) {
+          atExpiry = [[yAt, yAt]];
+          compact = true;
+        }
         Object.assign(dbg.zones[dbg.zones.length - 1], { cells, width: zoneW, compact });
 
         if (compact) {
-          ctx.strokeStyle = `rgba(${rgb.join(',')},0.95)`;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          const bx = xRef + 4;
+          // A soft capsule on the expiry line over the prices where the max is reached.
           for (const [a0, b0] of atExpiry) {
             const mid = (a0 + b0) / 2;
-            const a = Math.min(a0, mid - 4);
-            const b = Math.max(b0, mid + 4);
-            ctx.moveTo(bx + 5, a);
-            ctx.lineTo(bx, a);
-            ctx.lineTo(bx, b);
-            ctx.lineTo(bx + 5, b);
+            const top = Math.max(plotT + 1, Math.min(a0, mid - 6));
+            const bot = Math.min(plotB - 1, Math.max(b0, mid + 6));
+            ctx.save();
+            ctx.shadowColor = `rgba(${rgb.join(',')},0.9)`;
+            ctx.shadowBlur = 12;
+            roundRect(ctx, xRef - 4, top, 8, bot - top, 4);
+            ctx.fillStyle = `rgba(${rgb.join(',')},0.55)`;
+            ctx.fill();
+            ctx.restore();
+            roundRect(ctx, xRef - 4, top, 8, bot - top, 4);
+            ctx.strokeStyle = `rgba(${rgb.join(',')},0.95)`;
+            ctx.lineWidth = 1;
+            ctx.stroke();
           }
-          ctx.stroke();
-          ctx.lineWidth = 1;
         }
         if (!compact) {
         ctx.save();
@@ -784,7 +793,7 @@ export function Chart(props: Props) {
         const full = mixedExpiry ? `${title} · ${where} on ${fmtTime(tAt, false)}` : `${title} · ${where}`;
         const text = ctx.measureText(full).width < xRef - nowX - 16 ? full : title;
         const tw = ctx.measureText(text).width;
-        const tx = Math.max(nowX + 6, xRef - 8 - tw);
+        const tx = Math.max(nowX + 6, xRef - (compact ? 12 : 8) - tw);
         const ty = Math.max(plotT + 8, Math.min(plotB - 8, capY));
         ctx.fillStyle = 'rgba(12,15,20,0.72)';
         ctx.fillRect(tx - 4, ty - 8, tw + 8, 16);
@@ -795,8 +804,8 @@ export function Chart(props: Props) {
         ctx.fillText(text, tx, ty + 0.5);
       };
 
-      if (maxP > tol && !unlimitedProfit) drawZone('profit', maxP, ext.maxT);
-      if (minP < -tol && !unlimitedLoss) drawZone('loss', minP, ext.minT);
+      if (maxP > tol && !unlimitedProfit) drawZone('profit', maxP, ext.maxT, ext.maxS);
+      if (minP < -tol && !unlimitedLoss) drawZone('loss', minP, ext.minT, ext.minS);
 
       // ---- Open-ended tails ----
       // Past the outermost strike the payoff is a straight line. If it keeps falling, the loss has
