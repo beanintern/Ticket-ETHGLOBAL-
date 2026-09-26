@@ -384,7 +384,7 @@ export default function App() {
           </div>
         </div>
         <div className="conn" title="The mockup uses simulated prices. Nothing is sent to Derive.">
-          <span className="conn-dot" /> Derive · mock data
+          <span className="conn-dot" /> <span className="wide-only">Derive · </span>mock data
         </div>
       </header>
 
@@ -434,7 +434,8 @@ export default function App() {
                 <label className="switch">
                   <input id="include-portfolio" type="checkbox" checked={includePortfolio} onChange={(e) => setIncludePortfolio(e.target.checked)} />
                   <span className="switch-track" aria-hidden="true" />
-                  Include open positions
+                  <span className="wide-only">Include open positions</span>
+                  <span className="narrow-only">Positions</span>
                 </label>
               )}
               <div className="seg" role="group" aria-label="Time horizon">

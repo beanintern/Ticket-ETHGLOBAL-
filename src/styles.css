@@ -101,7 +101,7 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .switch input:checked + .switch-track::after { transform: translateX(12px); background: var(--long); }
 .focus-chip { padding: 5px 10px; border-radius: 6px; background: rgba(111,168,255,0.12); color: var(--long); font-size: 12px; font-weight: 500; }
 
-.chart-canvas-wrap { position: relative; flex: 1; min-height: 380px; touch-action: none; }
+.chart-canvas-wrap { position: relative; flex: 1; min-height: 380px; touch-action: pan-y; }
 .chart-canvas-wrap canvas { position: absolute; inset: 0; display: block; }
 .chart-legend {
   display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
@@ -213,6 +213,8 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
   box-shadow: 0 8px 30px rgba(0,0,0,0.4);
 }
 
+.narrow-only { display: none; }
+
 @media (max-width: 960px) {
   .app { height: auto; }
   .workspace { grid-template-columns: 1fr; }
@@ -222,11 +224,38 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
   .panel-body { overflow: visible; }
   .stats { display: none; }
   .tool kbd { display: none; }
+  /* The panel scrolls with the page here, so a sticky button would pin to the panel top. */
+  .order { position: static; padding: 0; }
 }
-@media (max-width: 520px) {
-  .topbar { gap: 10px; }
-  .conn { margin-left: 0; }
-  .tool { padding: 0 8px; font-size: 12px; }
+
+@media (max-width: 600px) {
+  .wide-only { display: none; }
+  .narrow-only { display: inline; }
+  .topbar {
+    display: grid; grid-template-columns: 1fr auto; gap: 8px 12px;
+    padding: 8px 16px;
+  }
+  .conn { grid-row: 1; grid-column: 2; margin-left: 0; font-size: 11px; }
+  .markets { grid-column: 1 / -1; }
+  .market { flex: 1; justify-content: space-between; padding: 6px 8px; gap: 6px; border-color: var(--line); }
+  .market span:last-child { font-size: 11px; }
+
+  .chart-toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 16px; }
+  .tools { flex: 1 1 100%; flex-wrap: nowrap; gap: 4px; }
+  .tools .tool { flex: 1 1 auto; justify-content: center; height: 34px; padding: 0 5px; gap: 5px; font-size: 11.5px; white-space: nowrap; }
+  .tools .tool:first-child { flex: 0 0 34px; }
+  .history { margin-right: 0; }
+  .history .tool { width: 34px; height: 34px; justify-content: center; padding: 0; }
+  .chart-controls { flex: 1; justify-content: space-between; gap: 8px; flex-wrap: nowrap; }
+  .switch { gap: 6px; }
+  .seg button { padding: 7px 6px; }
+  .chart-canvas-wrap { height: 58vh; min-height: 340px; touch-action: pan-y; }
+  .chart-legend { padding: 7px 16px; gap: 12px; }
+  .tabs button { padding: 12px 0; }
+}
+
+@media (max-width: 380px) {
+  .tools .glyph { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }

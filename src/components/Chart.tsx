@@ -71,6 +71,9 @@ const C = {
 
 const AXIS_W = 70;
 const PROFILE_W = 92;
+/** Below this width (phones) the axis, P&L strip and history get narrower so the plot keeps its room. */
+const NARROW_W = 600;
+const TOUCH_SLACK = 10;
 const TIME_H = 26;
 const TOP_H = 28;
 const PAST_FRAC = 0.3;
@@ -81,6 +84,8 @@ const MONO = '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
 const SANS = 'Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
 
 interface Geom {
+  axisW: number;
+  profileW: number;
   w: number;
   h: number;
   plotR: number;
@@ -158,10 +163,13 @@ export function Chart(props: Props) {
   const computeGeom = useCallback((): Geom => {
     const { w, h } = sizeRef.current;
     const { spot, now, view, candles, spec } = propsRef.current;
-    const plotR = w - AXIS_W - PROFILE_W;
+    const narrow = w < NARROW_W;
+    const axisW = narrow ? 52 : AXIS_W;
+    const profileW = narrow ? 40 : PROFILE_W;
+    const plotR = w - axisW - profileW;
     const plotT = TOP_H;
     const plotB = h - TIME_H;
-    const nowX = plotR * PAST_FRAC;
+    const nowX = plotR * (narrow ? 0.2 : PAST_FRAC);
     const pxPerMs = (plotR - nowX) / view.horizon;
     const tToX = (t: number) => nowX + (t - now) * pxPerMs;
     const xToT = (x: number) => now + (x - nowX) / pxPerMs;
@@ -184,7 +192,7 @@ export function Chart(props: Props) {
     hi = mid + half;
     const pToY = (p: number) => plotB - ((p - lo) / (hi - lo)) * (plotB - plotT);
     const yToP = (y: number) => lo + ((plotB - y) / (plotB - plotT)) * (hi - lo);
-    return { w, h, plotR, plotT, plotB, nowX, lo, hi, tToX, xToT, pToY, yToP };
+    return { axisW, profileW, w, h, plotR, plotT, plotB, nowX, lo, hi, tToX, xToT, pToY, yToP };
   }, []);
 
   /** Nearest listed expiry (by pixels) and strike for a point in the future region. */
@@ -216,6 +224,9 @@ export function Chart(props: Props) {
     const g = computeGeom();
     geomRef.current = g;
     const { plotR, plotT, plotB, nowX, tToX, xToT, pToY, yToP } = g;
+    const PW = g.profileW;
+    const AW = g.axisW;
+    const narrow = PW < PROFILE_W;
     const hover = hoverRef.current;
     const drag = dragRef.current;
 
@@ -329,7 +340,7 @@ export function Chart(props: Props) {
       ctx.stroke();
       ctx.fillStyle = C.muted;
       ctx.textAlign = 'left';
-      ctx.fillText(fmtPrice(v, pStep < 1 ? 2 : 0), plotR + PROFILE_W + 8, y);
+      ctx.fillText(fmtPrice(v, pStep < 1 ? 2 : 0), plotR + PW + 8, y);
     }
 
     // ---- Time grid + axis ----
@@ -446,7 +457,7 @@ export function Chart(props: Props) {
     ctx.strokeStyle = 'rgba(227,231,238,0.45)';
     ctx.beginPath();
     ctx.moveTo(0, sy);
-    ctx.lineTo(plotR + PROFILE_W, sy);
+    ctx.lineTo(plotR + PW, sy);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = C.spot;
@@ -539,7 +550,7 @@ export function Chart(props: Props) {
         ctx.font = `11px ${SANS}`;
         const w2 = Math.max(tw, ctx.measureText(sub).width) + 18;
         const right = ex + 14 + w2 < plotR;
-        const lx = right ? ex + 14 : ex - 14 - w2;
+        const lx = right ? ex + 14 : Math.max(4, ex - 14 - w2);
         const ly = Math.max(plotT + 4, Math.min(plotB - 40, (y0 + y1) / 2 - 18));
         roundRect(ctx, lx, ly, w2, 36, 5);
         ctx.fillStyle = 'rgba(12,15,20,0.88)';
@@ -634,13 +645,13 @@ export function Chart(props: Props) {
     // ---- Profile gutter: P&L across price at one moment ----
     const gx0 = plotR;
     ctx.fillStyle = '#0e1218';
-    ctx.fillRect(gx0, plotT, PROFILE_W, plotB - plotT);
+    ctx.fillRect(gx0, plotT, PW, plotB - plotT);
     ctx.strokeStyle = C.line;
     ctx.beginPath();
     ctx.moveTo(gx0 + 0.5, plotT);
     ctx.lineTo(gx0 + 0.5, plotB);
-    ctx.moveTo(gx0 + PROFILE_W + 0.5, 0);
-    ctx.lineTo(gx0 + PROFILE_W + 0.5, h);
+    ctx.moveTo(gx0 + PW + 0.5, 0);
+    ctx.lineTo(gx0 + PW + 0.5, h);
     ctx.stroke();
     if (legsForPnl.length) {
       const firstExp = Math.min(...legsForPnl.map((l) => l.expiry));
@@ -653,8 +664,8 @@ export function Chart(props: Props) {
         pts.push([y, v]);
         pm = Math.max(pm, Math.abs(v));
       }
-      const zx = gx0 + PROFILE_W / 2;
-      const half = PROFILE_W / 2 - 6;
+      const zx = gx0 + PW / 2;
+      const half = PW / 2 - 6;
       for (const [y, v] of pts) {
         const rgb = v >= 0 ? C.profit : C.loss;
         ctx.fillStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.75)`;
@@ -667,11 +678,11 @@ export function Chart(props: Props) {
       ctx.lineTo(zx + 0.5, plotB);
       ctx.stroke();
       ctx.fillStyle = 'rgba(14,18,24,0.9)';
-      ctx.fillRect(gx0 + 1, plotT, PROFILE_W - 1, 30);
+      ctx.fillRect(gx0 + 1, plotT, PW - 1, 30);
       ctx.font = `600 9px ${MONO}`;
       ctx.fillStyle = C.muted;
       ctx.textAlign = 'center';
-      ctx.fillText(hoverT ? 'P&L AT' : 'AT EXPIRY', zx, plotT + 10);
+      ctx.fillText(narrow ? (hoverT ? 'P&L' : 'EXP') : hoverT ? 'P&L AT' : 'AT EXPIRY', zx, plotT + 10);
       ctx.fillStyle = C.text;
       ctx.fillText(fmtTime(tProf, !!hoverT && tStep < DAY), zx, plotT + 22);
       if (hoverT) {
@@ -686,19 +697,19 @@ export function Chart(props: Props) {
       ctx.font = `600 9px ${MONO}`;
       ctx.fillStyle = C.dim;
       ctx.textAlign = 'center';
-      ctx.fillText('P&L', gx0 + PROFILE_W / 2, plotT + 10);
+      ctx.fillText('P&L', gx0 + PW / 2, plotT + 10);
     }
 
     // Spot tag on the axis.
     ctx.font = `600 11px ${MONO}`;
-    const sLabel = fmtPrice(spot, spec.priceDecimals);
-    roundRect(ctx, plotR + PROFILE_W + 2, sy - 9, AXIS_W - 4, 18, 3);
+    const sLabel = fmtPrice(spot, narrow ? 0 : spec.priceDecimals);
+    roundRect(ctx, plotR + PW + 2, sy - 9, AW - 4, 18, 3);
     ctx.fillStyle = C.text;
     ctx.fill();
     ctx.fillStyle = C.bg;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(sLabel, plotR + PROFILE_W + 7, sy + 0.5);
+    ctx.fillText(sLabel, plotR + PW + 7, sy + 0.5);
 
     // ---- Crosshair + tooltip ----
     if (hover && hover.x < plotR && hover.y > plotT && hover.y < plotB && !drag) {
@@ -707,7 +718,7 @@ export function Chart(props: Props) {
       ctx.setLineDash([2, 3]);
       ctx.beginPath();
       ctx.moveTo(0, hy);
-      ctx.lineTo(plotR + PROFILE_W, hy);
+      ctx.lineTo(plotR + PW, hy);
       if (hover.x <= nowX) {
         ctx.moveTo(Math.round(hover.x) + 0.5, plotT);
         ctx.lineTo(Math.round(hover.x) + 0.5, plotB);
@@ -715,12 +726,12 @@ export function Chart(props: Props) {
       ctx.stroke();
       ctx.setLineDash([]);
       const hp = yToP(hover.y);
-      roundRect(ctx, plotR + PROFILE_W + 2, hy - 9, AXIS_W - 4, 18, 3);
+      roundRect(ctx, plotR + PW + 2, hy - 9, AW - 4, 18, 3);
       ctx.fillStyle = C.line;
       ctx.fill();
       ctx.fillStyle = C.text;
       ctx.font = `11px ${MONO}`;
-      ctx.fillText(fmtPrice(hp, hp < 100 ? 2 : 0), plotR + PROFILE_W + 7, hy + 0.5);
+      ctx.fillText(fmtPrice(hp, hp < 100 ? 2 : 0), plotR + PW + 7, hy + 0.5);
 
       const lines: { text: string; color?: string; bold?: boolean }[] = [];
       const ht = xToT(hover.x);
@@ -764,14 +775,14 @@ export function Chart(props: Props) {
     ctx.moveTo(0, plotB + 0.5);
     ctx.lineTo(w, plotB + 0.5);
     ctx.moveTo(0, plotT - 0.5);
-    ctx.lineTo(plotR + PROFILE_W, plotT - 0.5);
+    ctx.lineTo(plotR + PW, plotT - 0.5);
     ctx.stroke();
 
     // Cursor.
     let cursor = 'default';
     if (drag) cursor = drag.kind === 'axis' ? 'ns-resize' : 'grabbing';
     else if (overMarker) cursor = 'grab';
-    else if (hover && hover.x > plotR + PROFILE_W) cursor = 'ns-resize';
+    else if (hover && hover.x > plotR + PW) cursor = 'ns-resize';
     else if (snap && tool !== 'pointer') cursor = 'crosshair';
     canvas.style.cursor = cursor;
   }, [computeGeom, snapAt]);
@@ -879,8 +890,30 @@ export function Chart(props: Props) {
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
 
-  const hitMarker = (x: number, y: number) =>
-    [...markersRef.current].reverse().find((m) => x >= m.x && x <= m.x + m.w && y >= m.y && y <= m.y + m.h);
+  /** `slack` widens the target for fingers. */
+  const hitMarker = (x: number, y: number, slack = 0) =>
+    [...markersRef.current]
+      .reverse()
+      .find((m) => x >= m.x - slack && x <= m.x + m.w + slack && y >= m.y - slack && y <= m.y + m.h + slack);
+
+  // Touch: the chart lets vertical swipes scroll the page (touch-action: pan-y), except when the
+  // finger lands on a leg or the price axis, where we block scrolling so the drag works.
+  const tapRef = useRef<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onTouchStart = (e: TouchEvent) => {
+      const g = geomRef.current;
+      const t = e.touches[0];
+      if (!g || !t || e.touches.length > 1) return;
+      const r = canvas.getBoundingClientRect();
+      const x = t.clientX - r.left;
+      const y = t.clientY - r.top;
+      if (x > g.plotR + g.profileW || hitMarker(x, y, TOUCH_SLACK)) e.preventDefault();
+    };
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+    return () => canvas.removeEventListener('touchstart', onTouchStart);
+  }, []);
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
@@ -888,12 +921,12 @@ export function Chart(props: Props) {
     hoverRef.current = { x, y };
     const g = geomRef.current ?? computeGeom();
     const p = propsRef.current;
-    if (x > g.plotR + PROFILE_W) {
+    if (x > g.plotR + g.profileW) {
       dragRef.current = { kind: 'axis', startX: x, startY: y, startShift: p.view.yShift, moved: false };
       (e.target as Element).setPointerCapture(e.pointerId);
       return;
     }
-    const m = hitMarker(x, y);
+    const m = hitMarker(x, y, e.pointerType === 'touch' ? TOUCH_SLACK : 0);
     if (m) {
       const leg = p.editableLegs.find((l) => l.id === m.id)!;
       dragRef.current = { kind: 'leg', id: m.id, startX: x, startY: y, moved: false, strike: leg.strike, expiry: leg.expiry };
@@ -901,6 +934,18 @@ export function Chart(props: Props) {
       draw();
       return;
     }
+    // A finger might be starting a scroll, so touches act on lift-off (see onPointerUp).
+    if (e.pointerType === 'touch') {
+      tapRef.current = { x, y };
+      draw();
+      return;
+    }
+    act(g, x, y);
+  };
+
+  /** Click / tap on empty chart: place a leg with the active tool, or clear the selection. */
+  const act = (g: Geom, x: number, y: number) => {
+    const p = propsRef.current;
     if (p.tool === 'pointer') {
       p.onSelect(null);
       return;
@@ -915,6 +960,8 @@ export function Chart(props: Props) {
   const onPointerMove = (e: React.PointerEvent) => {
     const { x, y } = pos(e);
     hoverRef.current = { x, y };
+    const tap = tapRef.current;
+    if (tap && Math.abs(x - tap.x) + Math.abs(y - tap.y) > 10) tapRef.current = null;
     const d = dragRef.current;
     const g = geomRef.current;
     if (d && g) {
@@ -935,6 +982,9 @@ export function Chart(props: Props) {
   };
 
   const onPointerUp = () => {
+    const tap = tapRef.current;
+    tapRef.current = null;
+    if (tap && geomRef.current) act(geomRef.current, tap.x, tap.y);
     const d = dragRef.current;
     dragRef.current = null;
     if (d?.kind === 'leg') {
@@ -957,7 +1007,7 @@ export function Chart(props: Props) {
   const onDoubleClick = (e: React.MouseEvent) => {
     const g = geomRef.current;
     const r = canvasRef.current!.getBoundingClientRect();
-    if (g && e.clientX - r.left > g.plotR + PROFILE_W) {
+    if (g && e.clientX - r.left > g.plotR + g.profileW) {
       const p = propsRef.current;
       p.onViewChange({ ...p.view, yZoom: 1, yShift: 0 });
     }
@@ -970,7 +1020,13 @@ export function Chart(props: Props) {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        onPointerCancel={() => {
+          // The browser took over (usually a scroll): drop the gesture without acting on it.
+          tapRef.current = null;
+          dragRef.current = null;
+          hoverRef.current = null;
+          draw();
+        }}
         onPointerLeave={() => {
           if (!dragRef.current) {
             hoverRef.current = null;
