@@ -42,6 +42,7 @@ const PRESETS: [Preset, string][] = [
   ['straddle', 'Straddle'],
   ['strangle', 'Strangle'],
   ['condor', 'Iron condor'],
+  ['chaos', 'Chaos'],
 ];
 
 const pnlClass = (v: number) => (v > 0.005 ? 'up' : v < -0.005 ? 'down' : '');

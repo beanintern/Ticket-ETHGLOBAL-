@@ -493,7 +493,7 @@ export function Chart(props: Props) {
         const k = legsForPnl.reduce((a, l) => (Math.abs(l.strike - p) < Math.abs(a - p) ? l.strike : a), legsForPnl[0].strike);
         return fmtPrice(Math.abs(k - p) / p < 0.03 ? k : p, 0);
       };
-      const drawCap = ([y0, y1]: [number, number], v: number, kind: 'profit' | 'loss') => {
+      const drawCap = ([y0, y1]: [number, number], v: number, kind: 'profit' | 'loss', withLabel: boolean) => {
         const rgb = kind === 'profit' ? C.profit : C.loss;
         const col = `rgb(${rgb.join(',')})`;
         const atTop = y0 <= plotT + 2;
@@ -525,6 +525,7 @@ export function Chart(props: Props) {
         ctx.stroke();
         ctx.setLineDash([]);
 
+        if (!withLabel) return;
         const title = `${kind === 'profit' ? 'MAX PROFIT' : 'MAX LOSS'} ${signedUsd(v)}`;
         const sub = kind === 'profit' ? `capped ${where}` : `limited ${where}`;
         ctx.font = `600 11px ${MONO}`;
@@ -548,8 +549,19 @@ export function Chart(props: Props) {
         ctx.fillStyle = C.muted;
         ctx.fillText(sub, lx + 9, ly + 26);
       };
-      if (maxP > tol && !unlimitedProfit) for (const r of runs((v) => v >= maxP - tol)) drawCap(r, maxP, 'profit');
-      if (minP < -tol && !unlimitedLoss) for (const r of runs((v) => v <= minP + tol)) drawCap(r, minP, 'loss');
+      // Bracket every plateau, but label only the one nearest spot so repeated peaks don't stack labels.
+      const nearest = (rs: [number, number][]) =>
+        rs.reduce((a, r) => (Math.abs((r[0] + r[1]) / 2 - spotY) < Math.abs((a[0] + a[1]) / 2 - spotY) ? r : a), rs[0]);
+      if (maxP > tol && !unlimitedProfit) {
+        const rs = runs((v) => v >= maxP - tol);
+        const lab = rs.length ? nearest(rs) : null;
+        for (const r of rs) drawCap(r, maxP, 'profit', r === lab);
+      }
+      if (minP < -tol && !unlimitedLoss) {
+        const rs = runs((v) => v <= minP + tol);
+        const lab = rs.length ? nearest(rs) : null;
+        for (const r of rs) drawCap(r, minP, 'loss', r === lab);
+      }
     }
 
     // ---- Leg markers ----

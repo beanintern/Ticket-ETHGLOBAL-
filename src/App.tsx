@@ -44,7 +44,7 @@ function initFeeds(now: number): Record<Asset, Feed> {
   return out;
 }
 
-export type Preset = 'callSpread' | 'putSpread' | 'straddle' | 'strangle' | 'condor';
+export type Preset = 'callSpread' | 'putSpread' | 'straddle' | 'strangle' | 'condor' | 'chaos';
 
 function presetLegs(preset: Preset, asset: Asset, spot: number, now: number): Leg[] {
   const spec = MARKETS[asset];
@@ -65,6 +65,28 @@ function presetLegs(preset: Preset, asset: Asset, spot: number, now: number): Le
       return [mk('P', 1, atm - w), mk('C', 1, atm + w)];
     case 'condor':
       return [mk('P', 1, atm - 2 * w), mk('P', -1, atm - w), mk('C', -1, atm + w), mk('C', 1, atm + 2 * w)];
+    case 'chaos': {
+      // A demo of what stacking legs can do. Any piecewise-linear payoff can be built from calls:
+      // each call bends the payoff line at its strike by its quantity. Two zig-zags ("sawtooth")
+      // on different expiries, out of phase, turn the P&L map into stripes that shift over time.
+      const weeklies = exps.filter((e) => e.kind !== 'daily' && e.ts - now > 2 * DAY && e.ts - now < 20 * DAY).map((e) => e.ts);
+      const e1 = weeklies[0] ?? expiry;
+      const e2 = weeklies[1] ?? e1;
+      const legs: Leg[] = [];
+      const zigzag = (exp: number, width: number, kinks: number, amp: number, phase: number) => {
+        let prev = 0;
+        for (let i = 0; i <= kinks; i++) {
+          const strike = atm + (i - kinks / 2) * width;
+          const slope = i === kinks ? 0 : (i + phase) % 2 === 0 ? amp : -amp;
+          const d = slope - prev;
+          if (d !== 0) legs.push({ id: newId(), asset, type: 'C', side: d > 0 ? 1 : -1, strike, expiry: exp, qty: Math.abs(d) });
+          prev = slope;
+        }
+      };
+      zigzag(e1, step * 2, 12, 1, 0);
+      zigzag(e2, step * 4, 8, 2, 1);
+      return legs;
+    }
   }
 }
 

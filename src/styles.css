@@ -234,3 +234,4 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .history { display: flex; gap: 4px; margin-right: auto; }
 .tool.icon { padding: 0 8px; }
 .tool:disabled { opacity: 0.35; cursor: default; border-color: var(--line-2); color: var(--muted); }
+.panel-body > * { flex-shrink: 0; }
