@@ -49,6 +49,8 @@ interface Props {
   onViewChange: (v: ChartView) => void;
   onAdd: (type: OptType, side: Side, strike: number, expiry: number) => void;
   onMove: (id: string, strike: number, expiry: number) => void;
+  /** Moves several legs at once (the group handle), as one undo step. */
+  onMoveGroup: (moves: { id: string; strike: number; expiry: number }[]) => void;
   onSelect: (id: string | null) => void;
   onRemove: (id: string) => void;
 }
@@ -120,8 +122,17 @@ interface Marker {
   h: number;
 }
 
+/** Marker id of the handle that moves every editable leg together. */
+const GROUP_ID = '__group';
+
+type LegPos = { id: string; strike: number; expiry: number };
+
 interface DragState {
-  kind: 'leg' | 'axis' | 'pan';
+  kind: 'leg' | 'axis' | 'pan' | 'group';
+  /** Group drag: the legs as they were when grabbed, where each would land now, and where each is drawn. */
+  groupFrom?: LegPos[];
+  groupTo?: LegPos[];
+  groupLive?: LegPos[];
   startFrac?: number;
   touch?: boolean;
   id?: string;
@@ -140,11 +151,9 @@ interface DragState {
   grabDY?: number;
 }
 
-/** After a drop, the leg glides from where it was released to its snapped strike and expiry. */
+/** After a drop, legs glide from where they were released to their snapped strikes and expiries. */
 interface Settle {
-  id: string;
-  from: { strike: number; expiry: number };
-  to: { strike: number; expiry: number };
+  moves: { id: string; from: { strike: number; expiry: number }; to: { strike: number; expiry: number } }[];
   t0: number;
 }
 
@@ -290,24 +299,31 @@ export function Chart(props: Props) {
     // A leg being dragged is drawn and priced where the pointer is (continuously, so the map
     // morphs smoothly); after the drop it glides to its snapped strike and expiry.
     const dragLeg = drag?.kind === 'leg' && drag.moved ? drag : null;
-    let override: { id: string; strike: number; expiry: number } | null = null;
-    if (dragLeg) override = { id: dragLeg.id!, strike: dragLeg.liveStrike!, expiry: dragLeg.liveExpiry! };
+    const dragGroup = drag?.kind === 'group' && drag.moved && drag.groupLive ? drag : null;
+    // Legs drawn and priced somewhere other than their current strike/expiry this frame.
+    let override: Map<string, { strike: number; expiry: number }> | null = null;
+    if (dragLeg) override = new Map([[dragLeg.id!, { strike: dragLeg.liveStrike!, expiry: dragLeg.liveExpiry! }]]);
+    if (dragGroup) override = new Map(dragGroup.groupLive!.map((l) => [l.id, l]));
     const settle = settleRef.current;
     if (!override && settle) {
       const k = Math.min(1, (performance.now() - settle.t0) / SETTLE_MS);
       if (k >= 1) settleRef.current = null;
       else {
         const e = 1 - (1 - k) ** 3;
-        override = {
-          id: settle.id,
-          strike: settle.from.strike + (settle.to.strike - settle.from.strike) * e,
-          expiry: settle.from.expiry + (settle.to.expiry - settle.from.expiry) * e,
-        };
+        override = new Map(
+          settle.moves.map((m) => [
+            m.id,
+            { strike: m.from.strike + (m.to.strike - m.from.strike) * e, expiry: m.from.expiry + (m.to.expiry - m.from.expiry) * e },
+          ]),
+        );
       }
     }
     const legs = model.legs;
     const legsForPnl = override
-      ? legs.map((l) => (l.id === override.id ? { ...l, strike: override.strike, expiry: override.expiry } : l))
+      ? legs.map((l) => {
+          const o = override!.get(l.id);
+          return o ? { ...l, strike: o.strike, expiry: o.expiry } : l;
+        })
       : legs;
     // Re-price the dragged leg at its new strike/expiry, so the map shows the trade as it
     // would be if you dropped it here (new premium, not the old one).
@@ -973,11 +989,81 @@ export function Chart(props: Props) {
     for (const part of ['line', 'dot'] as const) {
       for (const l of staticLegs) if (!editableIds.has(l.id)) drawLeg(l, false, part);
       for (const l of editableLegs) {
-        if (override && l.id === override.id) drawLeg({ ...l, strike: override.strike, expiry: override.expiry }, !!dragLeg, part);
+        const o = override?.get(l.id);
+        if (o) drawLeg({ ...l, strike: o.strike, expiry: o.expiry }, !!dragLeg || !!dragGroup, part);
         else drawLeg(l, false, part);
       }
     }
+
+    // ---- Group handle: drag it to move every leg of the ticket together ----
+    if (editableLegs.length >= 2) {
+      const placed = editableLegs.map((l) => {
+        const o = override?.get(l.id);
+        return { x: Math.min(tToX(o?.expiry ?? l.expiry), plotR - 2), y: pToY(o?.strike ?? l.strike) };
+      });
+      const gx = placed.reduce((a, q) => a + q.x, 0) / placed.length;
+      let gy = placed.reduce((a, q) => a + q.y, 0) / placed.length;
+      // Keep it clear of the leg dots (e.g. two legs on one strike).
+      if (placed.some((q) => Math.hypot(q.x - gx, q.y - gy) < 16)) gy -= 20;
+      if (gy > plotT + 8 && gy < plotB - 8 && gx > nowX) {
+        const hot = !!dragGroup || (hover && Math.hypot(hover.x - gx, hover.y - gy) < 12);
+        ctx.beginPath();
+        ctx.arc(gx, gy, 8, 0, Math.PI * 2);
+        ctx.fillStyle = hot ? C.text : 'rgba(17,21,28,0.92)';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = C.text;
+        ctx.stroke();
+        // Four-way arrow.
+        ctx.strokeStyle = hot ? '#0c0f14' : C.text;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        for (const [dx, dy] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ]) {
+          ctx.moveTo(gx + dx * 1.5, gy + dy * 1.5);
+          ctx.lineTo(gx + dx * 5, gy + dy * 5);
+          ctx.moveTo(gx + dx * 5 - dy * 1.8 - dx * 1.8, gy + dy * 5 - dx * 1.8 - dy * 1.8);
+          ctx.lineTo(gx + dx * 5, gy + dy * 5);
+          ctx.lineTo(gx + dx * 5 + dy * 1.8 - dx * 1.8, gy + dy * 5 + dx * 1.8 - dy * 1.8);
+        }
+        ctx.stroke();
+        ctx.lineWidth = 1;
+        markers.push({ id: GROUP_ID, x: gx - 11, y: gy - 11, w: 22, h: 22, label: `Move all ${editableLegs.length} legs together`, color: C.text });
+      }
+    }
     markersRef.current = markers;
+
+    // Group drag: where each leg lands if dropped now.
+    if (dragGroup && dragGroup.groupTo) {
+      ctx.strokeStyle = 'rgba(227,231,238,0.75)';
+      ctx.setLineDash([3, 3]);
+      for (const l of dragGroup.groupTo) {
+        ctx.beginPath();
+        ctx.arc(Math.min(tToX(l.expiry), plotR - 2), pToY(l.strike), 9, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      const from = dragGroup.groupFrom!;
+      const dK = dragGroup.groupTo[0].strike - from[0].strike;
+      const top = dragGroup.groupTo.reduce((a, l) => (pToY(l.strike) < pToY(a.strike) ? l : a));
+      const text = `${dK === 0 ? '±0' : `${dK > 0 ? '+' : '−'}${fmtPrice(Math.abs(dK), 0)}`} · ${[...new Set(dragGroup.groupTo.map((l) => fmtTime(l.expiry, false)))].join(', ')}`;
+      ctx.font = `600 11px ${MONO}`;
+      const tw = ctx.measureText(text).width + 12;
+      const sx = Math.min(tToX(top.expiry), plotR - 2);
+      const sy = pToY(top.strike) - 22;
+      const tx = Math.max(nowX + 2, Math.min(plotR - tw - 2, sx - tw / 2));
+      roundRect(ctx, tx, sy - 10, tw, 20, 4);
+      ctx.fillStyle = 'rgba(17,21,28,0.92)';
+      ctx.fill();
+      ctx.fillStyle = C.text;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, tx + 6, sy + 0.5);
+    }
 
     // Snap target while dragging: where the leg will land if dropped now.
     if (dragLeg) {
@@ -1159,7 +1245,7 @@ export function Chart(props: Props) {
 
     // Cursor.
     let cursor = 'default';
-    if (drag) cursor = drag.kind === 'axis' ? 'ns-resize' : 'grabbing';
+    if (drag) cursor = drag.kind === 'axis' ? 'ns-resize' : drag.kind === 'group' ? 'move' : 'grabbing';
     else if (tool === 'pointer' && hover && hover.x < plotR) cursor = overMarker ? 'grab' : 'move';
     else if (overMarker) cursor = 'grab';
     else if (hover && hover.x > plotR + PW) cursor = 'ns-resize';
@@ -1399,6 +1485,13 @@ export function Chart(props: Props) {
       return;
     }
     const m = hitMarker(x, y, e.pointerType === 'touch' ? TOUCH_SLACK : 0);
+    if (m && m.id === GROUP_ID) {
+      const from = p.editableLegs.map((l) => ({ id: l.id, strike: l.strike, expiry: l.expiry }));
+      dragRef.current = { kind: 'group', startX: x, startY: y, moved: false, groupFrom: from, groupTo: from };
+      (e.target as Element).setPointerCapture(e.pointerId);
+      draw();
+      return;
+    }
     if (m) {
       const leg = p.editableLegs.find((l) => l.id === m.id)!;
       dragRef.current = { kind: 'leg', id: m.id, startX: x, startY: y, moved: false, strike: leg.strike, expiry: leg.expiry, grabDX: m.x + m.w / 2 - x, grabDY: m.y + m.h / 2 - y };
@@ -1491,6 +1584,31 @@ export function Chart(props: Props) {
         const p = propsRef.current;
         lastMoveRef.current = performance.now();
         p.onViewChange({ ...p.view, yShift: d.startShift! + ((y - d.startY) / (g.plotB - g.plotT)) * p.view.yZoom });
+      } else if (d.kind === 'group') {
+        if (d.moved) {
+          const p = propsRef.current;
+          const cy = Math.max(g.plotT + 1, Math.min(g.plotB - 1, y));
+          const dP = g.yToP(cy) - g.yToP(d.startY);
+          const dT = g.xToT(Math.max(g.nowX + 3, Math.min(g.plotR, x))) - g.xToT(d.startX);
+          const from = d.groupFrom!;
+          // Drawn and priced continuously under the pointer…
+          d.groupLive = from.map((l) => ({ id: l.id, strike: Math.max(1, l.strike + dP), expiry: Math.max(p.now + HOUR, l.expiry + dT) }));
+          // …and landing on listed contracts: every leg shifts by the same number of expiries, and
+          // by the same strike offset (taken from the first leg's snap), so the shape is kept.
+          const exps = p.expiries.map((e) => e.ts);
+          const idxOf = (ts: number) => exps.reduce((bi, e, i) => (Math.abs(e - ts) < Math.abs(exps[bi] - ts) ? i : bi), 0);
+          if (exps.length) {
+            const idx = from.map((l) => idxOf(l.expiry));
+            const anchor = from.reduce((a, l, i) => (l.expiry < from[a].expiry ? i : a), 0);
+            let k = idxOf(from[anchor].expiry + dT) - idx[anchor];
+            k = Math.max(-Math.min(...idx), Math.min(exps.length - 1 - Math.max(...idx), k));
+            const newExp = idx.map((i) => exps[i + k]);
+            const snapped0 = p.market.snapStrike(from[0].strike + dP, newExp[0]);
+            const dK = snapped0 - from[0].strike;
+            d.groupTo = from.map((l, i) => ({ id: l.id, strike: p.market.snapStrike(l.strike + dK, newExp[i]), expiry: newExp[i] }));
+          }
+          lastMoveRef.current = performance.now();
+        }
       } else if (d.moved) {
         const cx = Math.max(g.nowX + 3, Math.min(g.plotR, x + (d.grabDX ?? 0)));
         const cy = Math.max(g.plotT + 1, Math.min(g.plotB - 1, y + (d.grabDY ?? 0)));
@@ -1519,22 +1637,34 @@ export function Chart(props: Props) {
       const p = propsRef.current;
       if (d.moved) {
         settleRef.current = {
-          id: d.id!,
-          from: { strike: d.liveStrike ?? d.strike!, expiry: d.liveExpiry ?? d.expiry! },
-          to: { strike: d.strike!, expiry: d.expiry! },
+          moves: [{ id: d.id!, from: { strike: d.liveStrike ?? d.strike!, expiry: d.liveExpiry ?? d.expiry! }, to: { strike: d.strike!, expiry: d.expiry! } }],
           t0: performance.now(),
         };
-        const glide = () => {
-          if (!settleRef.current) return;
-          lastMoveRef.current = performance.now();
-          draw();
-          requestAnimationFrame(glide);
-        };
-        requestAnimationFrame(glide);
+        glide();
         p.onMove(d.id!, d.strike!, d.expiry!);
       } else p.onSelect(d.id!);
     }
+    if (d?.kind === 'group' && d.moved && d.groupTo && d.groupLive) {
+      const live = new Map(d.groupLive.map((l) => [l.id, l]));
+      settleRef.current = {
+        moves: d.groupTo.map((l) => ({ id: l.id, from: live.get(l.id)!, to: { strike: l.strike, expiry: l.expiry } })),
+        t0: performance.now(),
+      };
+      glide();
+      propsRef.current.onMoveGroup(d.groupTo);
+    }
     draw();
+  };
+
+  /** Redraws each frame while a drop settles. */
+  const glide = () => {
+    const step = () => {
+      if (!settleRef.current) return;
+      lastMoveRef.current = performance.now();
+      draw();
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
   };
 
   const onContextMenu = (e: React.MouseEvent) => {
@@ -1542,7 +1672,7 @@ export function Chart(props: Props) {
     const m = hitMarker(e.clientX - r.left, e.clientY - r.top);
     if (m) {
       e.preventDefault();
-      propsRef.current.onRemove(m.id);
+      if (m.id !== GROUP_ID) propsRef.current.onRemove(m.id);
     }
   };
 

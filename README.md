@@ -76,7 +76,9 @@ NETWORK=testnet npm run check:live
 
 - **Chart** (`src/components/Chart.tsx`, canvas). Past price as candles left of *now*; the
   future shows the listed expiries. Click with a leg tool to add a leg at the snapped expiry and
-  listed strike. Drag a leg to move it, right-click (or long-press on touch) to remove it. The
+  listed strike. Drag a leg to move it, right-click (or long-press on touch) to remove it. With
+  two or more legs, a handle between them moves the whole structure at once: every leg shifts by
+  the same strike offset and the same number of expiries, so a spread keeps its shape. The
   future region is shaded by the position's P&L at each (time, price) point, with a break-even
   line, outlines where P&L is within 5% of its max profit / max loss, and hatching for
   open-ended losses. The strip next to the price axis shows P&L across price at the first

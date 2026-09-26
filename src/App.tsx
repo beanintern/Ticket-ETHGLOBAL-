@@ -410,6 +410,13 @@ export default function App() {
     (id: string, strike: number, expiry: number) => setLegs((legs) => legs.map((l) => (l.id === id ? { ...l, strike, expiry } : l))),
     [setLegs],
   );
+  const onMoveGroup = useCallback(
+    (moves: { id: string; strike: number; expiry: number }[]) => {
+      const to = new Map(moves.map((m) => [m.id, m]));
+      setLegs((legs) => legs.map((l) => (to.has(l.id) ? { ...l, strike: to.get(l.id)!.strike, expiry: to.get(l.id)!.expiry } : l)));
+    },
+    [setLegs],
+  );
   const onRemove = useCallback((id: string) => setLegs((legs) => legs.filter((l) => l.id !== id)), [setLegs]);
 
   // Keyboard: 1-4 pick a leg tool, V pointer, Delete removes the selected leg,
@@ -706,6 +713,7 @@ export default function App() {
             onViewChange={setView}
             onAdd={onAdd}
             onMove={onMove}
+            onMoveGroup={onMoveGroup}
             onSelect={setSelectedLegId}
             onRemove={(id) => {
               const leg = builderLegs.find((l) => l.id === id);
