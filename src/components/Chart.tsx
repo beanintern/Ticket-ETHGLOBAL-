@@ -75,6 +75,8 @@ const TIME_H = 26;
 const TOP_H = 28;
 const PAST_FRAC = 0.3;
 const CELL = 4;
+/** Coarser P&L map while the view is moving, refined once it settles. */
+const CELL_MOVING = 8;
 const MONO = '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
 const SANS = 'Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
 
@@ -149,6 +151,8 @@ export function Chart(props: Props) {
   const dragRef = useRef<DragState | null>(null);
   const markersRef = useRef<Marker[]>([]);
   const geomRef = useRef<Geom | null>(null);
+  const lastMoveRef = useRef(0);
+  const zoomRef = useRef<{ horizon: number; yZoom: number; raf: number; cur: ChartView; sent: ChartView[] } | null>(null);
   const heatRef = useRef<{ key: string; canvas: HTMLCanvasElement; maxAbs: number; contour: number[] } | null>(null);
 
   const computeGeom = useCallback((): Geom => {
@@ -236,8 +240,9 @@ export function Chart(props: Props) {
     // Only paint up to the last expiry: after that everything has settled.
     const lastExp = legsForPnl.length ? Math.max(...legsForPnl.map((l) => l.expiry)) : now;
     const heatR = Math.min(plotR, tToX(lastExp));
-    const cols = Math.max(0, Math.ceil((heatR - nowX) / CELL));
-    const rows = Math.ceil((plotB - plotT) / CELL);
+    const cell = performance.now() - lastMoveRef.current < 200 ? CELL_MOVING : CELL;
+    const cols = Math.max(0, Math.ceil((heatR - nowX) / cell));
+    const rows = Math.ceil((plotB - plotT) / cell);
     let maxAbs = 0;
     if (legsForPnl.length && cols > 0 && rows > 0) {
       const key = [
@@ -250,14 +255,15 @@ export function Chart(props: Props) {
         g.lo.toFixed(3),
         g.hi.toFixed(3),
         view.horizon,
+        cell,
       ].join('#');
       if (!heatRef.current || heatRef.current.key !== key) {
         const vals = new Float32Array(cols * rows);
         let mx = 0;
         for (let c = 0; c < cols; c++) {
-          const t = xToT(nowX + (c + 0.5) * CELL);
+          const t = xToT(nowX + (c + 0.5) * cell);
           for (let r = 0; r < rows; r++) {
-            const v = pnlFn(yToP(plotT + (r + 0.5) * CELL), t);
+            const v = pnlFn(yToP(plotT + (r + 0.5) * cell), t);
             vals[r * cols + c] = v;
             mx = Math.max(mx, Math.abs(v));
           }
@@ -285,7 +291,7 @@ export function Chart(props: Props) {
               const b = vals[(r + 1) * cols + c];
               if ((a >= 0) !== (b >= 0)) {
                 const f = a / (a - b);
-                contour.push(nowX + c * CELL, plotT + (r + 0.5 + f) * CELL);
+                contour.push(nowX + c * cell, plotT + (r + 0.5 + f) * cell);
               }
             }
           }
@@ -301,9 +307,9 @@ export function Chart(props: Props) {
         ctx.rect(nowX, plotT, heatR - nowX, plotB - plotT);
         ctx.clip();
         ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(heat.canvas, nowX, plotT, cols * CELL, rows * CELL);
+        ctx.drawImage(heat.canvas, nowX, plotT, cols * cell, rows * cell);
         ctx.fillStyle = 'rgba(227,231,238,0.55)';
-        for (let i = 0; i < heat.contour.length; i += 2) ctx.fillRect(heat.contour[i], heat.contour[i + 1] - 0.6, CELL, 1.2);
+        for (let i = 0; i < heat.contour.length; i += 2) ctx.fillRect(heat.contour[i], heat.contour[i + 1] - 0.6, cell, 1.2);
         ctx.restore();
       }
     }
@@ -808,26 +814,65 @@ export function Chart(props: Props) {
     return () => cancelAnimationFrame(raf);
   }, [draw]);
 
-  // Wheel: scroll zooms time; shift/axis scroll zooms price.
+  // Wheel: scroll zooms time; shift/axis scroll zooms price. The zoom amount follows how far
+  // you scrolled (so trackpads and mouse wheels feel the same) and eases toward the target.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const step = () => {
+      const z = zoomRef.current;
+      if (!z) return;
+      const { onViewChange } = propsRef.current;
+      const view = z.cur;
+      const ease = (cur: number, target: number) => {
+        const next = Math.exp(Math.log(cur) + (Math.log(target) - Math.log(cur)) * 0.28);
+        return Math.abs(Math.log(target / next)) < 0.002 ? target : next;
+      };
+      const horizon = ease(view.horizon, z.horizon);
+      const yZoom = ease(view.yZoom, z.yZoom);
+      lastMoveRef.current = performance.now();
+      z.cur = { ...view, horizon, yZoom };
+      z.sent.push(z.cur);
+      if (z.sent.length > 8) z.sent.shift();
+      onViewChange(z.cur);
+      if (horizon === z.horizon && yZoom === z.yZoom) zoomRef.current = null;
+      else z.raf = requestAnimationFrame(step);
+    };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const { view, onViewChange } = propsRef.current;
+      const { view } = propsRef.current;
       const g = geomRef.current;
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      const f = Math.exp(Math.sign(e.deltaY || e.deltaX) * 0.12);
-      if (e.shiftKey || (g && x > g.plotR)) {
-        onViewChange({ ...view, yZoom: Math.min(4, Math.max(0.15, view.yZoom * f)) });
-      } else {
-        onViewChange({ ...view, horizon: Math.min(150 * DAY, Math.max(1.5 * DAY, view.horizon * f)) });
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? rect.height : 1;
+      const raw = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      const d = Math.max(-80, Math.min(80, raw * unit));
+      const f = Math.exp(d * 0.0012);
+      const z = zoomRef.current ?? { horizon: view.horizon, yZoom: view.yZoom, raf: 0, cur: view, sent: [] };
+      if (e.shiftKey || (g && x > g.plotR)) z.yZoom = Math.min(4, Math.max(0.15, z.yZoom * f));
+      else z.horizon = Math.min(150 * DAY, Math.max(1.5 * DAY, z.horizon * f));
+      if (!zoomRef.current) {
+        zoomRef.current = z;
+        z.raf = requestAnimationFrame(step);
       }
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
-    return () => canvas.removeEventListener('wheel', onWheel);
+    return () => {
+      canvas.removeEventListener('wheel', onWheel);
+      if (zoomRef.current) cancelAnimationFrame(zoomRef.current.raf);
+      zoomRef.current = null;
+    };
   }, []);
+
+  // A view change that didn't come from the zoom animation (horizon buttons, axis drag, reset)
+  // cancels the animation so it doesn't pull the view back.
+  useEffect(() => {
+    const z = zoomRef.current;
+    if (z && !z.sent.includes(props.view)) {
+      cancelAnimationFrame(z.raf);
+      zoomRef.current = null;
+    }
+  }, [props.view]);
 
   const pos = (e: React.PointerEvent) => {
     const r = canvasRef.current!.getBoundingClientRect();
@@ -876,6 +921,7 @@ export function Chart(props: Props) {
       if (Math.abs(x - d.startX) + Math.abs(y - d.startY) > 4) d.moved = true;
       if (d.kind === 'axis') {
         const p = propsRef.current;
+        lastMoveRef.current = performance.now();
         p.onViewChange({ ...p.view, yShift: d.startShift! + ((y - d.startY) / (g.plotB - g.plotT)) * p.view.yZoom });
       } else if (d.moved) {
         const s = snapAt(g, Math.max(g.nowX + 3, Math.min(g.plotR, x)), Math.max(g.plotT + 1, Math.min(g.plotB - 1, y)));
