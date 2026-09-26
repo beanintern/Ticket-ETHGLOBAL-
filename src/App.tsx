@@ -490,11 +490,11 @@ export default function App() {
               )}
               <div className="seg" role="group" aria-label="Time horizon">
                 {[
-                  ['3D', 3 * DAY],
                   ['1W', 7 * DAY],
                   ['3W', 21 * DAY],
                   ['2M', 60 * DAY],
-                  ['4M', 120 * DAY],
+                  ['6M', 182 * DAY],
+                  ['1Y', 365 * DAY],
                 ].map(([label, ms]) => (
                   <button
                     key={label}

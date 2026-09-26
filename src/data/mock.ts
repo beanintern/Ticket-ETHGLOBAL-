@@ -19,7 +19,8 @@ import type { Market, MarketSource } from './types';
 
 function mockMarket(asset: Asset, now: number): Market & { tick(t: number): void } {
   const spec = MARKETS[asset];
-  const candles: Candle[] = generateHistory(spec, now);
+  // A year+ of history, so the past side of the chart is filled when zoomed out to 1Y.
+  const candles: Candle[] = generateHistory(spec, now, 400);
   let spot = candles[candles.length - 1].c;
   let expiries: Expiry[] = listExpiries(now);
   let expiriesHour = Math.floor(now / HOUR);

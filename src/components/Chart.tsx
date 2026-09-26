@@ -84,6 +84,8 @@ export const ZONE_FRAC = 0.05;
 const TIME_H = 26;
 const TOP_H = 28;
 const PAST_FRAC = 0.3;
+/** Furthest out you can zoom: past Derive's longest listed expiry (about a year). */
+const MAX_HORIZON = 430 * DAY;
 const CELL = 4;
 /** Coarser P&L map while the view is moving, refined once it settles. */
 const CELL_MOVING = 8;
@@ -461,13 +463,27 @@ export function Chart(props: Props) {
     }
 
     // ---- Time grid + axis ----
-    const pxPerDay = (plotR - nowX) / (view.horizon / DAY);
-    const tSteps = [HOUR, 2 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY, 14 * DAY, 30 * DAY];
-    const tStep = tSteps.find((s) => (s / DAY) * pxPerDay >= 80) ?? 30 * DAY;
-    const tStart = Math.ceil(xToT(0) / tStep) * tStep;
+    const pxPerDay = tToX(now + DAY) - tToX(now);
+    const tSteps = [HOUR, 2 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY, 14 * DAY, 30 * DAY, 61 * DAY, 91 * DAY];
+    const tStep = tSteps.find((s) => (s / DAY) * pxPerDay >= 80) ?? 91 * DAY;
+    // Up to two weeks apart, ticks are evenly spaced; beyond that they sit on month starts
+    // (every 1, 2 or 3 months), labelled "Nov", with the year on January.
+    const ticks: [number, string][] = [];
+    if (tStep < 30 * DAY) {
+      for (let t = Math.ceil(xToT(0) / tStep) * tStep; tToX(t) < plotR; t += tStep) ticks.push([t, fmtTime(t, tStep < DAY)]);
+    } else {
+      const every = tStep >= 91 * DAY ? 3 : tStep >= 61 * DAY ? 2 : 1;
+      const d0 = new Date(xToT(0));
+      for (let i = 1; ; i++) {
+        const t = Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth() + i, 1);
+        if (tToX(t) >= plotR) break;
+        const mo = new Date(t).getUTCMonth();
+        if (mo % every === 0) ticks.push([t, mo === 0 ? `${MON[mo]} ${new Date(t).getUTCFullYear()}` : MON[mo]]);
+      }
+    }
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    for (let t = tStart; tToX(t) < plotR; t += tStep) {
+    for (const [t, label] of ticks) {
       const x = Math.round(tToX(t)) + 0.5;
       ctx.strokeStyle = C.grid;
       ctx.beginPath();
@@ -476,7 +492,7 @@ export function Chart(props: Props) {
       ctx.stroke();
       if (Math.abs(x - nowX) > 40) {
         ctx.fillStyle = C.dim;
-        ctx.fillText(fmtTime(t, tStep < DAY), x, plotB + TIME_H / 2);
+        ctx.fillText(label, x, plotB + TIME_H / 2);
       }
     }
 
@@ -1254,7 +1270,7 @@ export function Chart(props: Props) {
       const f = Math.exp(d * 0.0012);
       const z = zoomRef.current ?? { horizon: view.horizon, yZoom: view.yZoom, raf: 0, cur: view, sent: [] };
       if (e.shiftKey || (g && x > g.plotR)) z.yZoom = Math.min(4, Math.max(0.15, z.yZoom * f));
-      else z.horizon = Math.min(150 * DAY, Math.max(1.5 * DAY, z.horizon * f));
+      else z.horizon = Math.min(MAX_HORIZON, Math.max(1.5 * DAY, z.horizon * f));
       if (!zoomRef.current) {
         zoomRef.current = z;
         z.raf = requestAnimationFrame(step);
@@ -1342,7 +1358,7 @@ export function Chart(props: Props) {
         const { view, onViewChange } = propsRef.current;
         const next = { ...view };
         // Only an axis the fingers are actually spread along gets zoomed.
-        if (pinch.dx > 40) next.horizon = Math.min(150 * DAY, Math.max(1.5 * DAY, pinch.horizon * (pinch.dx / Math.max(dx, 20))));
+        if (pinch.dx > 40) next.horizon = Math.min(MAX_HORIZON, Math.max(1.5 * DAY, pinch.horizon * (pinch.dx / Math.max(dx, 20))));
         if (pinch.dy > 40) next.yZoom = Math.min(4, Math.max(0.15, pinch.yZoom * (pinch.dy / Math.max(dy, 20))));
         lastMoveRef.current = performance.now();
         onViewChange(next);

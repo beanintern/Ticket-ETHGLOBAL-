@@ -30,9 +30,13 @@ const now = Date.now();
 for (const asset of ['ETH', 'BTC']) {
   const m = src.markets[asset];
   const exps = m.expiries;
-  console.log(`${asset}: index ${m.spot.toFixed(2)} · ${m.candles.length} hourly candles · ${exps.length} expiries (${exps.map((e) => `${e.label} ${e.kind[0]}`).join(', ')})`);
+  console.log(`${asset}: index ${m.spot.toFixed(2)} · ${m.candles.length} candles over ${((m.candles.at(-1).t - m.candles[0].t) / 864e5).toFixed(0)} days · ${exps.length} expiries (${exps.map((e) => `${e.label} ${e.kind[0]}`).join(', ')})`);
   if (!(m.spot > 0)) fail(`${asset}: no index price`);
   if (m.candles.length < 300) fail(`${asset}: only ${m.candles.length} candles`);
+  const spanDays = (m.candles.at(-1).t - m.candles[0].t) / 864e5;
+  if (spanDays < 300) fail(`${asset}: history only covers ${spanDays.toFixed(0)} days`);
+  const lastExp = m.expiries.at(-1);
+  if (lastExp && lastExp.ts - now < 180 * 864e5) fail(`${asset}: longest expiry ${lastExp.label} is under 6 months out`);
   const last = m.candles.at(-1);
   if (Math.abs(last.c / m.spot - 1) > 0.02) fail(`${asset}: last candle ${last.c} far from index ${m.spot}`);
   if (!exps.length) fail(`${asset}: no expiries`);

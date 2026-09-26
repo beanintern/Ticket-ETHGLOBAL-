@@ -266,15 +266,18 @@ export function createDeriveSource(url = DERIVE_WS): MarketSource {
   }
 
   async function loadHistory(asset: Asset) {
-    // The endpoint returns at most 500 points, so fetch ~40 days of hourly prices in two halves.
+    // The endpoint returns at most 500 points per call: fetch ~40 days of hourly prices in two
+    // halves, plus daily prices for the year before that (for zoomed-out views).
     type Pt = { price: string; timestamp: number };
     const now = Math.floor(Date.now() / 1000);
     const span = 20 * 86400;
-    const parts = await Promise.all(
-      [now - 2 * span, now - span].map((start) =>
-        sock.call<{ spot_feed_history: Pt[] }>('public/get_spot_feed_history', { currency: asset, start_timestamp: start, end_timestamp: start + span, period: 3600 }),
-      ),
-    );
+    const hist = (start: number, end: number, period: number) =>
+      sock.call<{ spot_feed_history: Pt[] }>('public/get_spot_feed_history', { currency: asset, start_timestamp: start, end_timestamp: end, period });
+    const parts = await Promise.all([
+      hist(now - 2 * span - 400 * 86400, now - 2 * span, 86400),
+      hist(now - 2 * span, now - span, 3600),
+      hist(now - span, now, 3600),
+    ]);
     const seen = new Set<number>();
     const pts = parts
       .flatMap((p) => p.spot_feed_history)

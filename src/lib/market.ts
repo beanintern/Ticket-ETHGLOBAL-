@@ -37,7 +37,11 @@ export function expiryLabel(ts: number): string {
   return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
 }
 
-/** Derive-style listing: dailies, Friday weeklies and last-Friday monthlies, all at 08:00 UTC. */
+/**
+ * Derive's listing pattern, all at 08:00 UTC: the next 5 days (dailies), the next 4 Fridays
+ * (weeklies), the last Friday of the next 3 months (monthlies), then last-Friday quarterlies
+ * (Mar/Jun/Sep/Dec) out to about a year.
+ */
 export function listExpiries(now: number): Expiry[] {
   const kinds = new Map<number, ExpiryKind>();
   const d = new Date(now);
@@ -47,20 +51,29 @@ export function listExpiries(now: number): Expiry[] {
 
   let day = Date.UTC(y, m, d.getUTCDate(), 8);
   while (day <= minTs) day += DAY;
-  for (let i = 0; i < 4; i++) kinds.set(day + i * DAY, 'daily');
+  for (let i = 0; i < 5; i++) kinds.set(day + i * DAY, 'daily');
 
   let fri = day;
   while (new Date(fri).getUTCDay() !== 5) fri += DAY;
-  for (let i = 0; i < 6; i++) kinds.set(fri + i * 7 * DAY, 'weekly');
+  for (let i = 0; i < 4; i++) kinds.set(fri + i * 7 * DAY, 'weekly');
 
+  const lastFriday = (year: number, month: number) => {
+    let t = Date.UTC(year, month + 1, 0, 8);
+    while (new Date(t).getUTCDay() !== 5) t -= DAY;
+    return t;
+  };
   let monthlies = 0;
-  for (let k = 0; k < 8 && monthlies < 4; k++) {
-    let last = Date.UTC(y, m + k + 1, 0, 8);
-    while (new Date(last).getUTCDay() !== 5) last -= DAY;
+  let k = 0;
+  for (; k < 6 && monthlies < 3; k++) {
+    const last = lastFriday(y, m + k);
     if (last > minTs) {
       kinds.set(last, 'monthly');
       monthlies++;
     }
+  }
+  for (; k < 13; k++) {
+    const month = (m + k) % 12;
+    if (month % 3 === 2) kinds.set(lastFriday(y, m + k), 'monthly'); // Mar, Jun, Sep, Dec
   }
 
   return [...kinds.entries()]
@@ -69,7 +82,8 @@ export function listExpiries(now: number): Expiry[] {
 }
 
 export function strikeStepFor(spec: MarketSpec, expiry: number, now: number): number {
-  return expiry - now > 21 * DAY ? spec.strikeStep * 2 : spec.strikeStep;
+  const t = expiry - now;
+  return t > 120 * DAY ? spec.strikeStep * 4 : t > 21 * DAY ? spec.strikeStep * 2 : spec.strikeStep;
 }
 
 export function snapStrike(spec: MarketSpec, price: number, expiry: number, now: number): number {
