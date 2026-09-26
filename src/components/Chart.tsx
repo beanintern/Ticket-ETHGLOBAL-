@@ -117,9 +117,26 @@ interface DragState {
   startY: number;
   startShift?: number;
   moved: boolean;
+  /** Where the leg will land on drop: the nearest listed strike and expiry. */
   strike?: number;
   expiry?: number;
+  /** Where the leg is drawn and priced during the drag: follows the pointer without snapping. */
+  liveStrike?: number;
+  liveExpiry?: number;
+  /** Pointer offset from the dot's centre when grabbed, so the dot doesn't hop to the cursor. */
+  grabDX?: number;
+  grabDY?: number;
 }
+
+/** After a drop, the leg glides from where it was released to its snapped strike and expiry. */
+interface Settle {
+  id: string;
+  from: { strike: number; expiry: number };
+  to: { strike: number; expiry: number };
+  t0: number;
+}
+
+const SETTLE_MS = 180;
 
 function niceStep(range: number, target: number): number {
   const raw = range / target;
@@ -154,6 +171,7 @@ export function Chart(props: Props) {
   propsRef.current = props;
   const hoverRef = useRef<{ x: number; y: number } | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const settleRef = useRef<Settle | null>(null);
   const markersRef = useRef<Marker[]>([]);
   const geomRef = useRef<Geom | null>(null);
   const lastMoveRef = useRef(0);
@@ -236,15 +254,31 @@ export function Chart(props: Props) {
     ctx.fillStyle = C.future;
     ctx.fillRect(nowX, plotT, plotR - nowX, plotB - plotT);
 
-    // Legs as they'd be after an in-progress drag.
+    // A leg being dragged is drawn and priced where the pointer is (continuously, so the map
+    // morphs smoothly); after the drop it glides to its snapped strike and expiry.
     const dragLeg = drag?.kind === 'leg' && drag.moved ? drag : null;
+    let override: { id: string; strike: number; expiry: number } | null = null;
+    if (dragLeg) override = { id: dragLeg.id!, strike: dragLeg.liveStrike!, expiry: dragLeg.liveExpiry! };
+    const settle = settleRef.current;
+    if (!override && settle) {
+      const k = Math.min(1, (performance.now() - settle.t0) / SETTLE_MS);
+      if (k >= 1) settleRef.current = null;
+      else {
+        const e = 1 - (1 - k) ** 3;
+        override = {
+          id: settle.id,
+          strike: settle.from.strike + (settle.to.strike - settle.from.strike) * e,
+          expiry: settle.from.expiry + (settle.to.expiry - settle.from.expiry) * e,
+        };
+      }
+    }
     const legs = model.legs;
-    const legsForPnl = dragLeg
-      ? legs.map((l) => (l.id === dragLeg.id ? { ...l, strike: dragLeg.strike!, expiry: dragLeg.expiry! } : l))
+    const legsForPnl = override
+      ? legs.map((l) => (l.id === override.id ? { ...l, strike: override.strike, expiry: override.expiry } : l))
       : legs;
     // Re-price the dragged leg at its new strike/expiry, so the map shows the trade as it
     // would be if you dropped it here (new premium, not the old one).
-    const liveModel = dragLeg ? buildModel(legsForPnl, spec, spot, now) : model;
+    const liveModel = override ? buildModel(legsForPnl, spec, spot, now) : model;
     const pnlFn = liveModel.pnl;
 
     // ---- P&L heat map over (time, price) ----
@@ -621,10 +655,36 @@ export function Chart(props: Props) {
     };
     for (const l of staticLegs) if (!editableIds.has(l.id)) drawLeg(l);
     for (const l of editableLegs) {
-      if (dragLeg && l.id === dragLeg.id) drawLeg({ ...l, strike: dragLeg.strike!, expiry: dragLeg.expiry! }, true);
+      if (override && l.id === override.id) drawLeg({ ...l, strike: override.strike, expiry: override.expiry }, !!dragLeg);
       else drawLeg(l);
     }
     markersRef.current = markers;
+
+    // Snap target while dragging: where the leg will land if dropped now.
+    if (dragLeg) {
+      const leg = legs.find((l) => l.id === dragLeg.id);
+      const sx = tToX(dragLeg.expiry!);
+      const sy = pToY(dragLeg.strike!);
+      ctx.strokeStyle = 'rgba(227,231,238,0.75)';
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(sx, sy, 9, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (leg) {
+        const text = `${fmtPrice(dragLeg.strike!, 0)} ${leg.type} · ${fmtTime(dragLeg.expiry!, false)}`;
+        ctx.font = `600 11px ${MONO}`;
+        const tw = ctx.measureText(text).width + 12;
+        const tx = Math.min(plotR - tw - 2, sx + 14);
+        roundRect(ctx, tx, sy - 10, tw, 20, 4);
+        ctx.fillStyle = 'rgba(17,21,28,0.92)';
+        ctx.fill();
+        ctx.fillStyle = C.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, tx + 6, sy + 0.5);
+      }
+    }
 
     // ---- Ghost for the active tool ----
     const overMarker = hover && markers.find((m) => hover.x >= m.x && hover.x <= m.x + m.w && hover.y >= m.y && hover.y <= m.y + m.h);
@@ -929,7 +989,7 @@ export function Chart(props: Props) {
     const m = hitMarker(x, y, e.pointerType === 'touch' ? TOUCH_SLACK : 0);
     if (m) {
       const leg = p.editableLegs.find((l) => l.id === m.id)!;
-      dragRef.current = { kind: 'leg', id: m.id, startX: x, startY: y, moved: false, strike: leg.strike, expiry: leg.expiry };
+      dragRef.current = { kind: 'leg', id: m.id, startX: x, startY: y, moved: false, strike: leg.strike, expiry: leg.expiry, grabDX: m.x + m.w / 2 - x, grabDY: m.y + m.h / 2 - y };
       (e.target as Element).setPointerCapture(e.pointerId);
       draw();
       return;
@@ -971,11 +1031,16 @@ export function Chart(props: Props) {
         lastMoveRef.current = performance.now();
         p.onViewChange({ ...p.view, yShift: d.startShift! + ((y - d.startY) / (g.plotB - g.plotT)) * p.view.yZoom });
       } else if (d.moved) {
-        const s = snapAt(g, Math.max(g.nowX + 3, Math.min(g.plotR, x)), Math.max(g.plotT + 1, Math.min(g.plotB - 1, y)));
+        const cx = Math.max(g.nowX + 3, Math.min(g.plotR, x + (d.grabDX ?? 0)));
+        const cy = Math.max(g.plotT + 1, Math.min(g.plotB - 1, y + (d.grabDY ?? 0)));
+        d.liveStrike = Math.max(1, g.yToP(cy));
+        d.liveExpiry = Math.max(propsRef.current.now + HOUR, g.xToT(cx));
+        const s = snapAt(g, cx, cy);
         if (s) {
           d.strike = s.strike;
           d.expiry = s.expiry;
         }
+        lastMoveRef.current = performance.now();
       }
     }
     draw();
@@ -989,8 +1054,22 @@ export function Chart(props: Props) {
     dragRef.current = null;
     if (d?.kind === 'leg') {
       const p = propsRef.current;
-      if (d.moved) p.onMove(d.id!, d.strike!, d.expiry!);
-      else p.onSelect(d.id!);
+      if (d.moved) {
+        settleRef.current = {
+          id: d.id!,
+          from: { strike: d.liveStrike ?? d.strike!, expiry: d.liveExpiry ?? d.expiry! },
+          to: { strike: d.strike!, expiry: d.expiry! },
+          t0: performance.now(),
+        };
+        const glide = () => {
+          if (!settleRef.current) return;
+          lastMoveRef.current = performance.now();
+          draw();
+          requestAnimationFrame(glide);
+        };
+        requestAnimationFrame(glide);
+        p.onMove(d.id!, d.strike!, d.expiry!);
+      } else p.onSelect(d.id!);
     }
     draw();
   };
