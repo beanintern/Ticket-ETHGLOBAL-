@@ -588,8 +588,8 @@ export function Chart(props: Props) {
     if (legsForPnl.length && maxAbs > 1e-9) {
       const firstExp = Math.min(...legsForPnl.map((l) => l.expiry));
       const ex = Math.round(Math.min(tToX(firstExp), plotR - 2));
-      // With legs on later expiries, the payoff at the first expiry still carries their time value,
-      // so it has soft peaks rather than flat tops. Mark the best/worst point instead of a zone box.
+      // With legs on later expiries, max profit/loss is measured at the first expiry (as in the Build
+      // panel); captions say so.
       const mixedExpiry = legsForPnl.some((l) => Math.abs(l.expiry - firstExp) > 60_000);
       let maxP = -Infinity;
       let minP = Infinity;
@@ -597,12 +597,10 @@ export function Chart(props: Props) {
       // strikes, and a grid alone can step over a peak or trough (the Build panel checks strikes too).
       const probe = [...legsForPnl.map((l) => l.strike)];
       for (let i = 0; i <= 600; i++) probe.push(spot * Math.exp(Math.log(0.05) + Math.log(400) * (i / 600)));
-      let maxS = spot;
-      let minS = spot;
       for (const S of probe) {
         const v = pnlFn(S, firstExp);
-        if (v > maxP) [maxP, maxS] = [v, S];
-        if (v < minP) [minP, minS] = [v, S];
+        maxP = Math.max(maxP, v);
+        minP = Math.min(minP, v);
       }
       const tail = pnlFn(spot * 40, firstExp) - pnlFn(spot * 20, firstExp);
       const unlimitedProfit = tail > 1e-6 * spot;
@@ -622,76 +620,6 @@ export function Chart(props: Props) {
         const p = yToP(y);
         const k = legsForPnl.reduce((a, l) => (Math.abs(l.strike - p) < Math.abs(a - p) ? l.strike : a), legsForPnl[0].strike);
         return fmtPrice(Math.abs(k - p) / p < 0.03 ? k : p, 0);
-      };
-      const drawCap = ([y0, y1]: [number, number], v: number, kind: 'profit' | 'loss', withLabel: boolean) => {
-        const rgb = kind === 'profit' ? C.profit : C.loss;
-        const col = `rgb(${rgb.join(',')})`;
-        const atTop = y0 <= plotT + 2;
-        const atBottom = y1 >= plotB - 2;
-        let where: string;
-        if (atTop && atBottom) where = 'across this range';
-        else if (y1 - y0 < 8) where = `at ${strikeLabel((y0 + y1) / 2)}`;
-        else if (atTop) where = `above ${strikeLabel(y1)}`;
-        else if (atBottom) where = `below ${strikeLabel(y0)}`;
-        else where = `${strikeLabel(y1)} – ${strikeLabel(y0)}`;
-
-        const point = y1 - y0 < 8;
-        const title = `${kind === 'profit' ? 'MAX PROFIT' : 'MAX LOSS'} ${signedUsd(v)}`;
-        const caption = mixedExpiry ? `${title} · ${where} on ${fmtTime(firstExp, false)}` : `${title} · ${where}`;
-        ctx.strokeStyle = `rgba(${rgb.join(',')},0.95)`;
-        ctx.lineWidth = 1.5;
-        ctx.lineJoin = 'round';
-        let capY: number;
-        if (point) {
-          // A single-price extreme: ring the point at expiry and run a thin line back to now.
-          const y = Math.round((y0 + y1) / 2) + 0.5;
-          ctx.beginPath();
-          ctx.arc(ex, y, 8, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.strokeStyle = `rgba(${rgb.join(',')},0.45)`;
-          ctx.beginPath();
-          ctx.moveTo(nowX, y);
-          ctx.lineTo(ex - 8, y);
-          ctx.stroke();
-          capY = y - 14;
-        } else {
-          // Outline the zone from now to expiry. An edge that runs off the chart stays open, since
-          // the zone carries on past it.
-          const L = Math.round(nowX) + 0.5;
-          const R = Math.round(ex) + 0.5;
-          const T = Math.round(y0) + 0.5;
-          const B = Math.round(y1) + 0.5;
-          ctx.beginPath();
-          if (atTop) ctx.moveTo(L, T);
-          else {
-            ctx.moveTo(L, T);
-            ctx.lineTo(R, T);
-          }
-          ctx.moveTo(R, T);
-          ctx.lineTo(R, B);
-          if (!atBottom) ctx.lineTo(L, B);
-          ctx.moveTo(L, B);
-          ctx.lineTo(L, T);
-          ctx.stroke();
-          // Caption inside the closed edge (the one next to the rest of the payoff).
-          if (!atTop) capY = y1 - y0 >= 22 ? y0 + 12 : y0 - 10;
-          else if (!atBottom) capY = y1 - 10;
-          else capY = y0 + 12;
-        }
-        ctx.lineWidth = 1;
-        if (!withLabel) return;
-        ctx.font = `600 10.5px ${MONO}`;
-        const cw = ctx.measureText(caption).width;
-        const text = cw < ex - nowX - 16 ? caption : title;
-        const tw = ctx.measureText(text).width;
-        const tx = Math.max(nowX + 6, ex - 8 - tw);
-        const ty = Math.max(plotT + 8, Math.min(plotB - 8, capY));
-        ctx.fillStyle = 'rgba(12,15,20,0.72)';
-        ctx.fillRect(tx - 4, ty - 8, tw + 8, 16);
-        ctx.fillStyle = col;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(text, tx, ty + 0.5);
       };
       const nearest = (rs: [number, number][]) =>
         rs.reduce((a, r) => (Math.abs((r[0] + r[1]) / 2 - spotY) < Math.abs((a[0] + a[1]) / 2 - spotY) ? r : a), rs[0]);
@@ -788,7 +716,7 @@ export function Chart(props: Props) {
         const title = `${kind === 'profit' ? 'MAX PROFIT' : 'MAX LOSS'} ${signedUsd(v)}`;
         const capY = !atTop ? (y1 - y0 >= 22 ? y0 + 12 : y0 - 10) : !atBottom ? y1 - 10 : y0 + 12;
         ctx.font = `600 10.5px ${MONO}`;
-        const full = `${title} · ${where}`;
+        const full = mixedExpiry ? `${title} · ${where} on ${fmtTime(firstExp, false)}` : `${title} · ${where}`;
         const text = ctx.measureText(full).width < ex - nowX - 16 ? full : title;
         const tw = ctx.measureText(text).width;
         const tx = Math.max(nowX + 6, ex - 8 - tw);
@@ -801,21 +729,8 @@ export function Chart(props: Props) {
         ctx.fillText(text, tx, ty + 0.5);
       };
 
-      if (maxP > tol && !unlimitedProfit) {
-        if (!mixedExpiry) drawZone('profit', maxP);
-        else {
-          // Mixed expiries: a soft peak, so mark the best point instead.
-          const py = pToY(maxS);
-          if (py > plotT && py < plotB) drawCap([py, py], maxP, 'profit', true);
-        }
-      }
-      if (minP < -tol && !unlimitedLoss) {
-        if (!mixedExpiry) drawZone('loss', minP);
-        else {
-          const my = pToY(minS);
-          if (my > plotT && my < plotB) drawCap([my, my], minP, 'loss', true);
-        }
-      }
+      if (maxP > tol && !unlimitedProfit) drawZone('profit', maxP);
+      if (minP < -tol && !unlimitedLoss) drawZone('loss', minP);
 
       // ---- Open-ended tails ----
       // Past the outermost strike the payoff is a straight line. If it keeps falling, the loss has
