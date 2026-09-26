@@ -3,8 +3,9 @@
 An options trading UI that feels like trading perps. The chart is the ticket: click a future
 expiry at a price to place a leg, and the P&L map shows where the position makes and loses money.
 
-Market data can be **live from Derive** (mainnet or testnet) or **simulated (demo)**. Orders are paper trades in
-both modes; nothing is signed or sent to Derive yet.
+Market data can be **live from Derive** (mainnet or testnet) or **simulated (demo)**. On testnet,
+with a Derive account connected, orders are real (test funds) and carry the builder code;
+everywhere else they're paper trades.
 
 ## Run it
 
@@ -19,7 +20,9 @@ npm run build:artifact   # single-file HTML preview in dist-artifact/ticket.html
 ### Deploy (Railway)
 
 The repo is ready to deploy as a Railway service from GitHub; no environment variables are
-required.
+required. To attach your builder code to orders, set `VITE_DERIVE_REFERRAL_CODE` (and optionally
+`VITE_DERIVE_EXTRA_FEE`) as service variables. They're read at build time, so redeploy after
+changing them.
 
 - `railway.json` sets the build (`npm run build`), start (`npm start`) and health check
   (`/healthz`).
@@ -96,8 +99,8 @@ In **Testnet** mode, **Connect** in the header links a Derive testnet account
 (`src/account/derive.ts`, using Derive's TypeScript SDK, loaded only when you connect):
 
 - Enter the wallet address that owns the account and a **session key** registered to it. The app
-  refuses the wallet's own key. The session key signs the WebSocket login (and, later, orders)
-  in the browser; it's kept in sessionStorage, or localStorage if you tick "remember", and
+  refuses the wallet's own key. The session key signs the WebSocket login and orders in the
+  browser; it's kept in sessionStorage, or localStorage if you tick "remember", and
   **Disconnect** forgets it.
 - The account panel shows the subaccount, value, margin, collateral and whether the key's scopes
   allow trading. The Positions tab lists the subaccount's option positions (drawn on the chart
@@ -105,12 +108,37 @@ In **Testnet** mode, **Connect** in the header links a Derive testnet account
 - Test funds: Sepolia ETH from a faucet, then **Mint** test USDC and deposit at
   [testnet.app.derive.xyz/developers](https://testnet.app.derive.xyz/developers).
 
-## Next: trading on Derive
+### Placing orders
 
-| Now | Next |
-| --- | --- |
-| paper fill at mark | signed order (or RFQ for multi-leg) with the builder code attached |
-| positions in localStorage | account positions and fills for the subaccount |
+With an account connected, **Review order** asks Derive for a dry run of every leg
+(`private/order_quote`: validity, expected fill and fees) before anything is sent.
 
-Builder code details (how it's attached to orders, fee settings) still need confirming against
-Derive's docs before that step.
+- **Market**: one immediate-or-cancel limit order per leg, priced up to 3% past the best bid/ask,
+  so it fills now against the book or not at all.
+- **Limit at mark**: one good-till-cancelled order per leg at the mark price. Cancel it from the
+  Positions tab.
+
+Legs are sent one at a time (`src/account/orders.ts`, `DeriveAccount.place`), and the app stops
+at the first leg Derive rejects. Close on a Derive position sends reduce-only market orders for
+each leg.
+
+### Builder code
+
+Set these as build variables, locally in `.env.local` or as Railway service variables:
+
+```sh
+VITE_DERIVE_REFERRAL_CODE=your-code   # your builder / referral code
+VITE_DERIVE_EXTRA_FEE=0.1             # optional builder fee, USDC per contract
+```
+
+With a code set, every order carries `referral_code` and `extra_fee`, the review panel shows the
+builder part of the fees, and Derive credits the fees to that code. Without one, orders go out
+with no builder fee. Whether testnet fees count toward the broker program is something to confirm
+with Derive.
+
+## Next
+
+- One RFQ for multi-leg structures, so all legs fill together at one price (`private/send_rfq` +
+  `private/execute_quote`) instead of leg by leg.
+- Mainnet: the same flow against `wss://api.derive.xyz/v3/ws`, once the market data moves from
+  the v2 API to v3.

@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { DeriveAccount, loadCredentials, type AccountState, type Credentials, type Portfolio } from './account/derive';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { DeriveAccount, loadCredentials, type AccountState, type Credentials, type OrderResult, type Portfolio } from './account/derive';
+import { instrumentName, legOrders, type OrderMode } from './account/orders';
+import type { Trading } from './components/DeriveReview';
 import { AccountButton, AccountPanel } from './components/AccountPanel';
 import { Chart, TOOL_LEG, type ChartView, type Tool } from './components/Chart';
 import { Sidebar } from './components/Sidebar';
@@ -270,7 +272,7 @@ export default function App() {
 
   useEffect(() => {
     if (!toast) return;
-    const id = setTimeout(() => setToast(null), 3200);
+    const id = setTimeout(() => setToast(null), toast.length > 80 ? 7000 : 3200);
     return () => clearTimeout(id);
   }, [toast]);
 
@@ -393,6 +395,58 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedLegId, onRemove, stepHistory]);
+
+  // Real orders on Derive testnet, while an account with a subaccount is connected.
+  const subaccountId = accountState?.subaccountId ?? null;
+  const canTrade = accountState?.canTrade ?? null;
+  const trading = useMemo<Trading | null>(() => {
+    if (!account || subaccountId === null) return null;
+    return {
+      canTrade,
+      subaccountId,
+      prepare: async (legs, mode: OrderMode) => {
+        const m = markets[legs[0]?.asset ?? 'ETH'];
+        const instruments = await account.instruments(legs.map(instrumentName));
+        const orders = legOrders(legs, m, instruments, mode);
+        return { orders, previews: await account.preview(orders, mode) };
+      },
+      place: (orders, mode) => account.place(orders, mode),
+    };
+  }, [account, subaccountId, canTrade, markets]);
+
+  const reportOrders = (results: OrderResult[], what: string) => {
+    const rejected = results.find((r) => !r.ok);
+    const filled = results.filter((r) => r.filled > 0).length;
+    const sent = results.filter((r) => r.ok).length;
+    if (rejected) {
+      setToast(
+        `${what}: ${rejected.order.instrument} rejected: ${rejected.error}${sent ? ` (${sent} earlier order${sent > 1 ? 's' : ''} went through)` : ''}`,
+      );
+    } else {
+      setToast(`${what}: ${sent} order${sent > 1 ? 's' : ''} sent, ${filled} filled${filled < sent ? '; the rest are open or cancelled (see Positions)' : ''}`);
+    }
+  };
+
+  const onPlaced = (results: OrderResult[]) => {
+    reportOrders(results, 'Derive');
+    if (!results.some((r) => r.ok)) return;
+    builderRef.current = { ...builderRef.current, [asset]: [] };
+    setBuilder(builderRef.current);
+    history.current = { past: [], future: [] };
+    setSelectedLegId(null);
+    setTab('positions');
+  };
+
+  const closeExchangePosition = async (pos: Position) => {
+    if (!account) return;
+    try {
+      const instruments = await account.instruments(pos.legs.map(instrumentName));
+      const orders = legOrders(pos.legs, markets[pos.asset], instruments, 'market', true);
+      reportOrders(await account.place(orders, 'market'), `Close ${pos.asset}`);
+    } catch (e) {
+      setToast(`Couldn't close: ${(e as Error).message}`);
+    }
+  };
 
   const placeOrder = () => {
     if (!builderLegs.length) return;
@@ -650,8 +704,21 @@ export default function App() {
             setLegs(() => presetLegs(p, market, now));
           }}
           onPlace={placeOrder}
+          trading={trading}
+          onPlaced={onPlaced}
           positions={positions}
-          exchange={accountEnabled ? { account: accountState, positions: onExchange, onConnect: () => setAccountOpen(true) } : null}
+          exchange={
+            accountEnabled
+              ? {
+                  account: accountState,
+                  positions: onExchange,
+                  onConnect: () => setAccountOpen(true),
+                  onClose: (pos) => void closeExchangePosition(pos),
+                  onCancelOrder: (id, instrument) =>
+                    void account?.cancel(id, instrument).catch((e) => setToast(`Couldn't cancel: ${(e as Error).message}`)),
+                }
+              : null
+          }
           closed={closed}
           focus={focus}
           onFocus={(id) => {

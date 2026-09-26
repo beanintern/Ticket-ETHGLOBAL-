@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import type { Focus, Preset } from '../App';
 import { compactUsd, price as fmtPrice, signed, signedUsd, usd } from '../lib/format';
-import type { AccountState } from '../account/derive';
+import type { AccountState, OrderResult } from '../account/derive';
+import { DeriveReview, type Trading } from './DeriveReview';
 import type { Market } from '../data/types';
 import { expiryLabel, type Asset, type MarketSpec } from '../lib/market';
 import {
@@ -31,9 +32,19 @@ interface Props {
   onClear: () => void;
   onPreset: (p: Preset) => void;
   onPlace: () => void;
+  /** Real (testnet) trading, while a Derive account is connected. */
+  trading: Trading | null;
+  onPlaced: (results: OrderResult[]) => void;
   positions: Position[];
   /** The connected Derive account (testnet), or null when accounts aren't available. */
-  exchange: { account: AccountState | null; positions: Position[]; onConnect: () => void } | null;
+  exchange: {
+    account: AccountState | null;
+    positions: Position[];
+    onConnect: () => void;
+    /** Closes an exchange position with reduce-only market orders. */
+    onClose: (pos: Position) => void;
+    onCancelOrder: (id: string, instrument: string) => void;
+  } | null;
   closed: ClosedPosition[];
   focus: Focus;
   onFocus: (id: string) => void;
@@ -68,7 +79,23 @@ export function Sidebar(props: Props) {
   );
 }
 
-function Builder({ spec, now, markets, builderLegs: legs, builderModel: model, selectedLegId, onSelectLeg, onUpdateLeg, onRemoveLeg, onClear, onPreset, onPlace }: Props) {
+function Builder({
+  spec,
+  now,
+  markets,
+  builderLegs: legs,
+  builderModel: model,
+  selectedLegId,
+  onSelectLeg,
+  onUpdateLeg,
+  onRemoveLeg,
+  onClear,
+  onPreset,
+  onPlace,
+  trading,
+  onPlaced,
+  exchange,
+}: Props) {
   const market = markets[spec.asset];
   const spot = market.spot;
   const [reviewing, setReviewing] = useState(false);
@@ -247,6 +274,20 @@ function Builder({ spec, now, markets, builderLegs: legs, builderModel: model, s
               <button className="primary" onClick={() => setReviewing(true)}>
                 Review order
               </button>
+            ) : trading ? (
+              <DeriveReview
+                legs={legs}
+                trading={trading}
+                onBack={() => setReviewing(false)}
+                onPaper={() => {
+                  setReviewing(false);
+                  onPlace();
+                }}
+                onDone={(r) => {
+                  setReviewing(false);
+                  onPlaced(r);
+                }}
+              />
             ) : (
               <div className="review">
                 <div className="eyebrow">Order preview · limit at mid</div>
@@ -267,9 +308,17 @@ function Builder({ spec, now, markets, builderLegs: legs, builderModel: model, s
                   <span>{debit >= 0 ? 'You pay' : 'You receive'}</span>
                   <b className="num">{usd(debit)}</b>
                 </div>
-                <p className="fine">
-                  Paper trade. When Derive is connected this submits one signed RFQ for all legs with your builder code attached.
-                </p>
+                {exchange ? (
+                  <p className="fine">
+                    Paper trade.{' '}
+                    <button className="link" onClick={exchange.onConnect}>
+                      Connect your Derive testnet account
+                    </button>{' '}
+                    to place real test orders.
+                  </p>
+                ) : (
+                  <p className="fine">Paper trade: filled at mark, nothing is sent to Derive. Switch to Testnet to place real test orders.</p>
+                )}
                 <div className="review-actions">
                   <button className="ghost" onClick={() => setReviewing(false)}>
                     Back
@@ -322,14 +371,15 @@ function PositionCard({
   focused,
   onFocus,
   onClose,
+  closeLabel,
 }: {
   pos: Position;
   now: number;
   markets: Props['markets'];
   focused: boolean;
   onFocus: () => void;
-  /** Absent for exchange positions, which are closed with orders. */
-  onClose?: () => void;
+  onClose: () => void;
+  closeLabel?: string;
 }) {
   const [confirming, setConfirming] = useState(false);
   const market = markets[pos.asset];
@@ -393,13 +443,13 @@ function PositionCard({
         <button className={focused ? 'ghost is-on' : 'ghost'} onClick={onFocus}>
           {focused ? 'Showing on chart' : 'Show on chart'}
         </button>
-        {!onClose ? null : confirming ? (
+        {confirming ? (
           <>
             <button className="ghost" onClick={() => setConfirming(false)}>
               Keep
             </button>
             <button className="danger" onClick={onClose}>
-              Close at {signedUsd(pnl, 0)}
+              {closeLabel ?? `Close at ${signedUsd(pnl, 0)}`}
             </button>
           </>
         ) : (
@@ -443,6 +493,8 @@ function ExchangeSection({ exchange, now, markets, focus, onFocus }: Pick<Props,
                   markets={markets}
                   focused={focus.kind === 'position' && focus.id === pos.id}
                   onFocus={() => onFocus(pos.id)}
+                  onClose={() => exchange.onClose(pos)}
+                  closeLabel="Close at market"
                 />
               ))}
             </ul>
@@ -469,6 +521,9 @@ function ExchangeSection({ exchange, now, markets, focus, onFocus }: Pick<Props,
                     <span className="num">
                       {o.filled}/{o.amount} @ {usd(o.limitPrice)}
                     </span>
+                    <button className="x" onClick={() => exchange.onCancelOrder(o.id, o.instrument)} title="Cancel order" aria-label={`Cancel ${o.instrument} order`}>
+                      ✕
+                    </button>
                   </li>
                 ))}
               </ul>

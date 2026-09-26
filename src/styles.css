@@ -252,6 +252,14 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .review td:first-child { width: 38px; font-weight: 600; }
 .review td.num { text-align: right; }
 .review-total { display: flex; justify-content: space-between; border-top: 1px solid var(--line-2); padding-top: 8px; font-weight: 500; }
+.review td { vertical-align: top; }
+.review td .fine, .review td .form-error { font-size: 11px; font-weight: 400; }
+.review-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.review-total.sub { border-top: 0; padding-top: 0; font-weight: 400; color: var(--muted); font-size: 12px; }
+.review .primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.review > .link { justify-self: center; }
+.acct-list .x { color: var(--dim); padding: 0 2px; }
+.acct-list .x:hover { color: var(--loss); }
 .review-actions { display: grid; grid-template-columns: auto 1fr; gap: 8px; }
 .review-actions .ghost { height: 38px; }
 

@@ -7,6 +7,7 @@
 // The Derive SDK (and ethers) are loaded on demand, so the chart doesn't pay for them.
 import type { DeriveClient } from '@derivexyz/derive-ts';
 import type { OptType } from '../lib/bs';
+import { BUILDER, type Instrument, type LegOrder } from './orders';
 import type { Asset } from '../lib/market';
 
 export interface Credentials {
@@ -65,6 +66,24 @@ export interface AccountState {
   scopes: string[] | null;
   canTrade: boolean | null;
   portfolio: Portfolio | null;
+}
+
+/** Derive's dry-run of one order: will it go through, at what price and fee. */
+export interface OrderPreview {
+  valid: boolean;
+  reason: string | null;
+  fillPrice: number;
+  fillAmount: number;
+  fee: number;
+}
+
+export interface OrderResult {
+  order: LegOrder;
+  ok: boolean;
+  status: string;
+  filled: number;
+  averagePrice: number;
+  error: string | null;
 }
 
 const REFRESH_MS = 5000;
@@ -143,6 +162,7 @@ export class DeriveAccount {
   private listeners = new Set<() => void>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
+  private instrumentCache = new Map<string, Promise<Instrument>>();
 
   private constructor(owner: string, signer: string) {
     this.state = { status: 'connecting', error: null, owner, signer, subaccountIds: [], subaccountId: null, scopes: null, canTrade: null, portfolio: null };
@@ -281,6 +301,87 @@ export class DeriveAccount {
       if (!this.state.portfolio) this.state.status = 'error';
     }
     if (!this.closed) this.emit();
+  }
+
+  /** Tick size and amount grid per instrument (fixed for an instrument's life, so cached). */
+  async instruments(names: string[]): Promise<Map<string, Instrument>> {
+    const out = new Map<string, Instrument>();
+    await Promise.all(
+      names.map(async (name) => {
+        let p = this.instrumentCache.get(name);
+        if (!p) {
+          p = this.sdk.send('public/get_instrument', { instrument_name: name }).then((i) => ({
+            tick: num(i.tick_size),
+            amountStep: num(i.amount_step),
+            minAmount: num(i.minimum_amount),
+          }));
+          p.catch(() => this.instrumentCache.delete(name));
+          this.instrumentCache.set(name, p);
+        }
+        try {
+          out.set(name, await p);
+        } catch {
+          /* not listed: legOrders reports it */
+        }
+      }),
+    );
+    return out;
+  }
+
+  private params(o: LegOrder, mode: 'market' | 'limit') {
+    if (this.state.subaccountId === null) throw new Error('No subaccount');
+    return {
+      subaccountId: this.state.subaccountId,
+      instrumentName: o.instrument,
+      direction: o.direction,
+      amount: o.amount,
+      limitPrice: o.limitPrice,
+      orderType: 'limit' as const,
+      timeInForce: mode === 'market' ? ('ioc' as const) : ('gtc' as const),
+      reduceOnly: o.reduceOnly || undefined,
+      label: 'ticket',
+      ...(BUILDER.code ? { referralCode: BUILDER.code, extraFee: BUILDER.extraFee ? String(BUILDER.extraFee) : undefined } : {}),
+    };
+  }
+
+  /** Signs each order and asks Derive what would happen, without placing anything. */
+  async preview(orders: LegOrder[], mode: 'market' | 'limit'): Promise<OrderPreview[]> {
+    return Promise.all(
+      orders.map(async (o) => {
+        try {
+          const q = await this.sdk.orders.getOrderQuote(this.params(o, mode));
+          return { valid: q.is_valid, reason: q.invalid_reason ? String(q.invalid_reason) : null, fillPrice: num(q.estimated_fill_price), fillAmount: num(q.estimated_fill_amount), fee: num(q.estimated_fee) };
+        } catch (e) {
+          return { valid: false, reason: explainError(e), fillPrice: 0, fillAmount: 0, fee: 0 };
+        }
+      }),
+    );
+  }
+
+  /**
+   * Places the orders one at a time, stopping at the first one Derive rejects so a failed leg
+   * doesn't leave the rest of the structure half-built. Reports what happened to each.
+   */
+  async place(orders: LegOrder[], mode: 'market' | 'limit'): Promise<OrderResult[]> {
+    const results: OrderResult[] = [];
+    for (const o of orders) {
+      try {
+        const res = await this.sdk.orders.place(this.params(o, mode));
+        const filled = num(res.order.filled_amount);
+        results.push({ order: o, ok: true, status: String(res.order.order_status), filled, averagePrice: num(res.order.average_price), error: null });
+      } catch (e) {
+        results.push({ order: o, ok: false, status: 'rejected', filled: 0, averagePrice: 0, error: explainError(e) });
+        break;
+      }
+    }
+    void this.refresh();
+    return results;
+  }
+
+  async cancel(orderId: string, instrument: string) {
+    if (this.state.subaccountId === null) return;
+    await this.sdk.orders.cancel({ subaccountId: this.state.subaccountId, orderId, instrumentName: instrument });
+    await this.refresh();
   }
 
   async disconnect() {
