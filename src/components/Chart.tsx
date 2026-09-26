@@ -586,6 +586,9 @@ export function Chart(props: Props) {
     if (legsForPnl.length && maxAbs > 1e-9) {
       const firstExp = Math.min(...legsForPnl.map((l) => l.expiry));
       const ex = Math.round(Math.min(tToX(firstExp), plotR - 2));
+      // With legs on later expiries, the payoff at the first expiry still carries their time value,
+      // so it has soft peaks rather than flat tops. Mark the best/worst point instead of a zone box.
+      const mixedExpiry = legsForPnl.some((l) => Math.abs(l.expiry - firstExp) > 60_000);
       let maxP = -Infinity;
       let minP = Infinity;
       // Sample a wide price range plus every strike exactly: payoffs have sharp corners at the
@@ -645,7 +648,7 @@ export function Chart(props: Props) {
 
         const point = y1 - y0 < 8;
         const title = `${kind === 'profit' ? 'MAX PROFIT' : 'MAX LOSS'} ${signedUsd(v)}`;
-        const caption = `${title} · ${where}`;
+        const caption = mixedExpiry ? `${title} · ${where} on ${fmtTime(firstExp, false)}` : `${title} · ${where}`;
         ctx.strokeStyle = `rgba(${rgb.join(',')},0.95)`;
         ctx.lineWidth = 1.5;
         ctx.lineJoin = 'round';
@@ -705,7 +708,7 @@ export function Chart(props: Props) {
       const nearest = (rs: [number, number][]) =>
         rs.reduce((a, r) => (Math.abs((r[0] + r[1]) / 2 - spotY) < Math.abs((a[0] + a[1]) / 2 - spotY) ? r : a), rs[0]);
       if (maxP > tol && !unlimitedProfit) {
-        const rs = runs((v) => v >= maxP - tol);
+        const rs = mixedExpiry ? [] : runs((v) => v >= maxP - tol);
         // A sharp peak at a single strike (no flat run to find): mark it at that strike.
         const py = pToY(maxS);
         if (!rs.length && py > plotT && py < plotB) rs.push([py, py]);
@@ -713,7 +716,7 @@ export function Chart(props: Props) {
         for (const r of rs) drawCap(r, maxP, 'profit', r === lab);
       }
       if (minP < -tol && !unlimitedLoss) {
-        const rs = runs((v) => v <= minP + tol);
+        const rs = mixedExpiry ? [] : runs((v) => v <= minP + tol);
         const my = pToY(minS);
         if (!rs.length && my > plotT && my < plotB) rs.push([my, my]);
         const lab = rs.length ? nearest(rs) : null;
