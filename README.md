@@ -16,6 +16,21 @@ npm run build            # typecheck + production build
 npm run build:artifact   # single-file HTML preview in dist-artifact/ticket.html (demo data)
 ```
 
+### Deploy (Railway)
+
+The repo is ready to deploy as a Railway service from GitHub; no environment variables are
+required.
+
+- `railway.json` sets the build (`npm run build`), start (`npm start`) and health check
+  (`/healthz`).
+- `npm start` runs `server.mjs`, a dependency-free static server for `dist/` on `$PORT`, with
+  long-lived caching for fingerprinted assets and a single-page-app fallback.
+- The deployed app defaults to live Derive data: each visitor's browser connects to Derive's
+  WebSocket directly, so the server only serves files. Add `?source=mock` for demo data, or set
+  `VITE_SOURCE=mock` as a build variable to make demo the default.
+
+To test the production build locally: `npm run build && npm start` (http://localhost:3000).
+
 ### Market data: Live vs Demo
 
 Switch with the **Live / Demo** control in the header, or `?source=live` / `?source=mock` in the
