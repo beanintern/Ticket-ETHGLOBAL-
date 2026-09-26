@@ -60,14 +60,19 @@ to that interface.
 ```sh
 npm run check:chart   # random positions vs an independent Black-Scholes calculation (demo data)
 N=200 SEED=7 npm run check:chart
+SEED=7 ONLY=113 npm run check:chart   # replay one case
 npm run check:live    # the live Derive layer against the real exchange
 NETWORK=testnet npm run check:live
 ```
 
-- `check:chart` places random positions and verifies, pixel by pixel, that leg dots, the P&L
-  colours, the break-even line, the max profit/loss outlines, the uncapped tags and the Build
-  panel all match an independent calculation. Failures are screenshotted to
-  `check-chart-failures/`.
+- `check:chart` checks named structures (spreads, condors, butterflies, calendars, single
+  options, each at several zooms and with the expiry at the chart's edge) and then random
+  positions. For each it verifies, against an independent calculation, the leg dots, the P&L
+  colours, the break-even line, the uncapped tags, the Build panel, and the max profit/loss
+  zones: their value, their label, and that the outline follows the 95% contour over time,
+  right up to each expiry (every contour point within 3 px of the outline, and no outline off the
+  contour). The demo market is seeded from `SEED` and frozen (`?freeze=1`), so a run replays
+  exactly; `ONLY=n` re-runs one case. Failures are screenshotted to `check-chart-failures/`.
 - `check:live` loads real Derive data with the app's own code and checks expiries, strikes,
   the index and history, that our pricing reproduces Derive's mark prices (within 0.5%), and
   that IV for unlisted strikes is interpolated sensibly.
@@ -81,7 +86,11 @@ NETWORK=testnet npm run check:live
   the same strike offset and the same number of expiries, so a spread keeps its shape. The
   future region is shaded by the position's P&L at each (time, price) point, with a break-even
   line, outlines where P&L is within 5% of its max profit / max loss, and hatching for
-  open-ended losses. The strip next to the price axis shows P&L across price at the first
+  open-ended losses. The outlines are traced with the exact P&L, not the shading grid: time is
+  sampled ever more finely approaching each expiry (where time value collapses and the boundary
+  moves fastest), prices are checked at every strike (where payoffs peak), and steep stretches,
+  tips and exits through the plot edge are refined, so the outline meets the expiry at the right
+  price. The strip next to the price axis shows P&L across price at the first
   expiry, or at the time under the cursor.
 - **Build tab**. Strategy name, net debit/credit, max profit/loss, break-evens, chance of
   profit, greeks and an editable leg list. Presets for common structures.

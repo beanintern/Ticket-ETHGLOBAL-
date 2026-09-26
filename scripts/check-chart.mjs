@@ -198,6 +198,7 @@ function inspect() {
     const want = kind === 'profit' ? maxP : minP;
     if (!wantZones[kind]) { if (z) fail(`${kind} zone drawn but max ${kind} is ${kind === 'profit' ? 'uncapped' : 'uncapped or ~0'}`); continue; }
     if (!z) { fail(`max ${kind} zone missing (expected ${want.toFixed(2)})`); continue; }
+    if ((z.cells > 0 || z.runs.length) && !z.labelled) fail(`max ${kind} zone is drawn but has no label`);
     if (Math.abs(z.v - want) > Math.abs(want) * 0.01 + 0.05) fail(`max ${kind} ${z.v.toFixed(2)}, expected ${want.toFixed(2)}`);
     // Nothing on the map may beat the stated max (or be worse than the stated max loss).
     let beyond = null;
@@ -221,6 +222,100 @@ function inspect() {
       else if (start !== null) { runs.push([start, y]); start = null; }
     }
     if (start !== null) runs.push([start, plotB]);
+    // The traced outline follows the true 95% contour over time, all the way to expiry: every
+    // point where P&L crosses that level must have the outline within a few pixels of it, and every
+    // piece of outline must sit on such a point.
+    if (z.segs && !z.compact) {
+      const lvl = z.level;
+      const f = (y, t) => (kind === 'profit' ? pnl(K.yToP(y), t) - lvl : lvl - pnl(K.yToP(y), t));
+      // Scan every pixel, and every strike too: at a strike the payoff can peak in a band thinner
+      // than a pixel.
+      const strikeYs = [...new Set(legs.map((l) => K.pToY(l.strike)))].filter((y) => y > plotT && y < plotB);
+      const scanYs = [];
+      for (let y = plotT + 1; y <= plotB; y++) scanYs.push(y);
+      scanYs.push(...strikeYs);
+      scanYs.sort((a, b) => a - b);
+      const crossings = (t) => {
+        const ys = [];
+        let fp = f(plotT, t);
+        let prevY = plotT;
+        for (const y of scanYs) {
+          const fy = f(y, t);
+          if ((fp >= 0) !== (fy >= 0)) {
+            let a = prevY, b = y;
+            for (let k = 0; k < 20; k++) { const m = (a + b) / 2; if ((f(m, t) >= 0) === (fp >= 0)) a = m; else b = m; }
+            ys.push((a + b) / 2);
+          }
+          fp = fy;
+          prevY = y;
+        }
+        return ys;
+      };
+      const distSeg = (x, y, [x1, y1, x2, y2]) => {
+        const dx = x2 - x1, dy = y2 - y1;
+        const u = Math.max(0, Math.min(1, ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy || 1)));
+        return Math.hypot(x1 + u * dx - x, y1 + u * dy - y);
+      };
+      const tEnd = Math.min(lastExp, K.xToT(plotR));
+      const ts = [];
+      for (let i = 1; i < 80; i++) ts.push(now + ((tEnd - now) * i) / 80);
+      // The contour moves fastest just before each expiry, as time value collapses.
+      for (const e of exps) if (e <= tEnd) for (let j = 0; j < 14; j++) { ts.push(e - (e - now) * 0.03 * 0.6 ** j); if (e + (e - now) * 0.03 * 0.6 ** j < tEnd) ts.push(e + (e - now) * 0.03 * 0.6 ** j); }
+      const TOL_PX = 3;
+      let missed = null;
+      for (const t of ts) {
+        const x = K.tToX(t);
+        if (x < nowX + 2 || x > plotR - 2) continue;
+        const cs = crossings(t);
+        const insideTop = f(plotT, t) >= 0;
+        for (let ci = 0; ci < cs.length; ci++) {
+          const y = cs[ci];
+          if (y < plotT + 2 || y > plotB - 2) continue;
+          // The in-zone band this crossing bounds. Bands under 2px tall (a spike in the last
+          // minutes before an expiry, say) can't be seen, so they don't need an outline.
+          const bandAbove = (ci % 2 === 0) === insideTop;
+          const other = bandAbove ? (cs[ci - 1] ?? plotT) : (cs[ci + 1] ?? plotB);
+          if (Math.abs(other - y) < 2) continue;
+          // An island that appears within the last pixel (it isn't there a pixel earlier, not even
+          // nearby) is too brief to see. A steep boundary is different: it still exists a pixel
+          // earlier, just elsewhere, so it isn't skipped.
+          const before = crossings(K.xToT(x - 1));
+          if (before.length < cs.length && !before.some((b) => Math.abs(b - y) < 3 || Math.abs(b - other) < 3)) continue;
+          const d = Math.min(Infinity, ...z.segs.map((sg) => distSeg(x, y, sg)));
+          if (d > TOL_PX && (!missed || d > missed.d)) missed = { d, t, y };
+        }
+      }
+      if (missed && window.__DEBUG_CHECK__) {
+        const cs = crossings(missed.t);
+        const mx = K.tToX(missed.t);
+        const close = z.segs.map((sg) => [distSeg(mx, missed.y, sg), sg]).sort((p, q) => p[0] - q[0])[0];
+        fail(`debug: miss at x ${mx.toFixed(1)} y ${missed.y.toFixed(1)}; closest seg ${close ? close[1].map((v) => v.toFixed(1)).join('/') : 'none'}`);
+        fail(`debug: crossings at that time ${cs.map((y) => K.yToP(y).toFixed(1)).join(', ')} · top inside ${f(plotT, missed.t) >= 0} · segs near x: ${z.segs.filter((sg) => Math.abs(sg[0] - K.tToX(missed.t)) < 6).map((sg) => sg.map((v) => v.toFixed(1)).join('/')).slice(0, 6).join(' ')}`);
+      }
+      if (missed) fail(`max ${kind} outline misses the 95% contour by ${missed.d.toFixed(0)}px at ${K.yToP(missed.y).toFixed(0)} on ${new Date(missed.t).toISOString().slice(0, 16)}`);
+      let stray = null;
+      for (const sg of z.segs) {
+        const [x1, y1, x2, y2] = sg;
+        const xm = (x1 + x2) / 2, ym = (y1 + y2) / 2;
+        if (ym < plotT + 2 || ym > plotB - 2) continue;
+        // Nearest point of the true contour, looking a few pixels either side too (at the tip of a
+        // zone the contour is nearest sideways, not straight up or down).
+        let d = Infinity;
+        for (let dx = -TOL_PX; dx <= TOL_PX; dx += 0.5) {
+          for (const c of crossings(K.xToT(xm + dx))) d = Math.min(d, Math.hypot(dx, c - ym));
+        }
+        // At the tip of a zone the peak P&L just touches the level, so the tip's position is
+        // ill-conditioned; there, judge by value: is P&L at this point at the level?
+        const onLevel = Math.abs(f(ym, K.xToT(xm))) < Math.abs(lvl) * 0.002 + 0.01;
+        if (d > TOL_PX && !onLevel && (!stray || d > stray.d)) stray = { d, x: xm, y: ym };
+      }
+      if (stray && window.__DEBUG_CHECK__) {
+        const sg = z.segs.find((q) => (q[0] + q[2]) / 2 === stray.x && (q[1] + q[3]) / 2 === stray.y);
+        const i = z.segs.indexOf(sg);
+        fail(`debug: stray seg #${i}/${z.segs.length} ${sg.map((v) => v.toFixed(2)).join('/')} · neighbours ${z.segs.slice(Math.max(0, i - 3), i + 4).map((q) => q.map((v) => v.toFixed(1)).join('/')).join('  ')} · crossings at mid ${crossings(K.xToT(stray.x)).map((y) => y.toFixed(1)).join(',')}`);
+      }
+      if (stray) fail(`max ${kind} outline strays ${Number.isFinite(stray.d) ? stray.d.toFixed(0) + 'px' : 'far'} off the contour at ${K.yToP(stray.y).toFixed(0)} on ${new Date(K.xToT(stray.x)).toISOString().slice(0, 16)}`);
+    }
     const tol = z.cell * 1.5 + 2;
     const big = (r) => r[1] - r[0] > 2 * z.cell;
     for (const r of runs.filter(big)) if (!z.runs.some((d) => Math.abs(d[0] - r[0]) <= tol && Math.abs(d[1] - r[1]) <= tol))
@@ -252,16 +347,76 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 860 }, deviceScaleFactor: 1 });
 const pageErrors = [];
 page.on('pageerror', (e) => pageErrors.push(e.message));
-await page.addInitScript(() => { window.__TICKET_TEST__ = true; });
-await page.goto(`${url}?source=mock`); // the check runs against the simulator
+// The simulator's random numbers come from SEED and its prices are frozen, so a run (and any
+// failure in it) replays exactly.
+await page.addInitScript(([seed, debug]) => {
+  window.__TICKET_TEST__ = true;
+  window.__DEBUG_CHECK__ = debug;
+  let s = seed | 0;
+  Math.random = () => {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}, [SEED, !!process.env.DEBUG]);
+await page.goto(`${url}?source=mock&freeze=1`); // the check runs against the simulator
 await page.waitForFunction(() => window.__ticket && window.__chart);
 await page.mouse.move(1300, 845); // keep the cursor (and its tooltip) off the chart
 
-let failed = 0, samples = 0;
+let failed = 0, samples = 0, total = 0;
+// ONLY=113 re-runs just that case (with the same SEED it's the same position and market).
+const ONLY = Number(process.env.ONLY ?? 0);
+async function runCase(asset, legs, horizonDays, tag = '') {
+  total++;
+  if (ONLY && total !== ONLY) return;
+  await page.evaluate(({ a, l, h }) => { window.__ticket.setLegs(a, l); window.__ticket.setView({ horizon: h, yZoom: 1, yShift: 0 }); }, { a: asset, l: legs, h: horizonDays * DAY });
+  await page.waitForTimeout(250);
+  const res = await page.evaluate(inspect);
+  samples += res.colourSamples;
+  const label = `#${total} ${tag}${asset} ${legs.map((l) => `${l.side > 0 ? '+' : '-'}${l.qty}${l.type}${l.strike}@${new Date(l.expiry).toISOString().slice(5, 10)}`).join(' ')} [${horizonDays}d]`;
+  if (res.failures.length) {
+    failed++;
+    mkdirSync(OUT, { recursive: true });
+    await page.screenshot({ path: `${OUT}/case-${total}.png` });
+    console.log(`FAIL ${label}`);
+    for (const f of res.failures) console.log(`     - ${f}`);
+  } else console.log(`ok   ${label}`);
+}
+
+// Named structures first: spreads, condors, butterflies and calendars, whose max profit / loss
+// zones curve over time. Each at a short, medium and long zoom.
+for (const asset of ['ETH', 'BTC']) {
+  const { spot, spec, expiries } = await page.evaluate((a) => ({ spot: window.__ticket.spot(a), spec: window.__ticket.specs[a], expiries: window.__ticket.expiries(a) }), asset);
+  const now = Date.now();
+  const exp = (days) => expiries.reduce((a, b) => (Math.abs(b - now - days * DAY) < Math.abs(a - now - days * DAY) ? b : a));
+  const step = spec.strikeStep * 2;
+  const k = Math.round(spot / step) * step;
+  const L = (type, side, dk, days, qty = 1) => ({ type, side, strike: k + dk * step, expiry: exp(days), qty });
+  const structures = {
+    'call spread': (d) => [L('C', 1, 1, d), L('C', -1, 4, d)],
+    'put spread': (d) => [L('P', 1, -1, d), L('P', -1, -4, d)],
+    'short call spread': (d) => [L('C', -1, 1, d), L('C', 1, 4, d)],
+    'iron condor': (d) => [L('P', 1, -6, d), L('P', -1, -3, d), L('C', -1, 3, d), L('C', 1, 6, d)],
+    butterfly: (d) => [L('C', 1, -3, d), L('C', -1, 0, d, 2), L('C', 1, 3, d)],
+    calendar: (d) => [L('C', -1, 0, Math.max(3, d / 4)), L('C', 1, 0, d)],
+    'short put': (d) => [L('P', -1, -3, d)],
+    'long call': (d) => [L('C', 1, 2, d)],
+  };
+  for (const [name, make] of Object.entries(structures))
+    for (const [days, horizon] of [[14, 21], [45, 60], [120, 182]]) await runCase(asset, make(days), horizon, `${name}: `);
+  // The same, with the last expiry just inside the right edge of the chart.
+  for (const [name, make] of Object.entries(structures)) {
+    const legs = make(60);
+    const last = Math.max(...legs.map((l) => l.expiry));
+    await runCase(asset, legs, ((last - now) / DAY) * 1.01, `${name} (expiry at edge): `);
+  }
+}
+
 for (let n = 0; n < N; n++) {
   const asset = rand() < 0.7 ? 'ETH' : 'BTC';
-  const { spot, spec, expiries } = await page.evaluate((a) => ({ spot: window.__ticket.spot(a), spec: window.__ticket.specs[a], expiries: window.__ticket.expiries() }), asset);
-  const horizonDays = pick([7, 21, 60]);
+  const { spot, spec, expiries } = await page.evaluate((a) => ({ spot: window.__ticket.spot(a), spec: window.__ticket.specs[a], expiries: window.__ticket.expiries(a) }), asset);
+  const horizonDays = pick([7, 21, 60, 182]);
   const now = Date.now();
   const inView = expiries.filter((e) => e - now < horizonDays * DAY * 0.95 && e - now > 6 * 3600e3);
   const oneDate = rand() < 0.65;
@@ -284,20 +439,9 @@ for (let n = 0; n < N; n++) {
     const strike = Math.max(step, Math.round((spot * Math.exp(0.08 * gauss())) / step) * step);
     legs.push({ type: rand() < 0.5 ? 'C' : 'P', side: rand() < 0.5 ? 1 : -1, strike, expiry, qty: 1 + Math.floor(rand() * 3) });
   }
-  await page.evaluate(({ a, l, h }) => { window.__ticket.setLegs(a, l); window.__ticket.setView({ horizon: h, yZoom: 1, yShift: 0 }); }, { a: asset, l: legs, h: horizonDays * DAY });
-  await page.waitForTimeout(250);
-  const res = await page.evaluate(inspect);
-  samples += res.colourSamples;
-  const label = `#${n + 1} ${asset} ${legs.map((l) => `${l.side > 0 ? '+' : '-'}${l.qty}${l.type}${l.strike}@${new Date(l.expiry).toISOString().slice(5, 10)}`).join(' ')} [${horizonDays}d]`;
-  if (res.failures.length) {
-    failed++;
-    mkdirSync(OUT, { recursive: true });
-    await page.screenshot({ path: `${OUT}/case-${n + 1}.png` });
-    console.log(`FAIL ${label}`);
-    for (const f of res.failures) console.log(`     - ${f}`);
-  } else console.log(`ok   ${label}`);
+  await runCase(asset, legs, horizonDays);
 }
-console.log(`\n${N - failed}/${N} positions passed · ${samples} colour samples checked${pageErrors.length ? ` · page errors: ${pageErrors.join('; ')}` : ''}`);
+console.log(`\n${(ONLY ? 1 : total) - failed}/${ONLY ? 1 : total} positions passed · ${samples} colour samples checked${pageErrors.length ? ` · page errors: ${pageErrors.join('; ')}` : ''}`);
 if (failed) console.log(`Screenshots of failures in ./${OUT}/`);
 await browser.close();
 await server.httpServer.close();

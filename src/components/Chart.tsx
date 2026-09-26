@@ -122,6 +122,15 @@ interface Marker {
   h: number;
 }
 
+/** A max profit / loss zone, traced: outline segments, closing edges, and where to caption it. */
+interface ZoneTrace {
+  segs: number[][];
+  startRuns: [number, number][];
+  endRuns: [number, number][] | null;
+  tRef: number;
+  atExpiry: [number, number][];
+}
+
 /** Marker id of the handle that moves every editable leg together. */
 const GROUP_ID = '__group';
 
@@ -197,6 +206,8 @@ export function Chart(props: Props) {
   const geomRef = useRef<Geom | null>(null);
   const lastMoveRef = useRef(0);
   const zoomRef = useRef<{ horizon: number; yZoom: number; raf: number; cur: ChartView; sent: ChartView[] } | null>(null);
+  /** Traced max profit / loss outlines, reused until the map (legs, view, prices) changes. */
+  const zoneCacheRef = useRef<Map<string, ZoneTrace>>(new Map());
   const heatRef = useRef<{
     key: string;
     canvas: HTMLCanvasElement;
@@ -278,7 +289,20 @@ export function Chart(props: Props) {
     geomRef.current = g;
     // What this frame drew, for the automated chart check (scripts/check-chart.mjs).
     const dbg = {
-      zones: [] as { kind: string; v: number; level: number; runs: [number, number][]; t: number; cell: number; cells?: number; width?: number; compact?: boolean }[],
+      zones: [] as {
+        kind: string;
+        v: number;
+        level: number;
+        runs: [number, number][];
+        t: number;
+        cell: number;
+        cells?: number;
+        width?: number;
+        compact?: boolean;
+        /** The traced outline (not its closing edges), as [x1, y1, x2, y2] segments. */
+        segs?: number[][];
+        labelled?: boolean;
+      }[],
       tags: [] as { dir: string; kind: string }[],
       rects: [] as [number, number, number, number][],
       firstExp: 0,
@@ -630,7 +654,6 @@ export function Chart(props: Props) {
       const lastExp = Math.max(...legsForPnl.map((l) => l.expiry));
       dbg.firstExp = firstExp;
       const ex = Math.round(Math.min(tToX(firstExp), plotR - 2));
-      const xLast = Math.round(Math.min(tToX(lastExp), plotR - 2));
       const mixedExpiry = lastExp - firstExp > 60_000;
       const ext = lifetimeExtremes(pnlFn, legsForPnl, spot, now);
       const { maxP, minP, unlimitedProfit, unlimitedLoss } = ext;
@@ -660,68 +683,257 @@ export function Chart(props: Props) {
         const heat = heatRef.current;
         if (!heat) return;
         const { vals, cols, rows, cell: hc, x0 } = heat;
-        // Trace up to the last expiry; caption and compact marker sit where the extreme is reached.
-        const cEx = Math.min(cols - 1, Math.floor((xLast - x0) / hc));
-        if (cEx < 0 || rows < 2) return;
-        const xRef = Math.round(Math.min(tToX(tAt), plotR - 2));
-        const cRef = Math.max(0, Math.min(cEx, Math.floor((xRef - x0) / hc)));
         const level = v * (1 - ZONE_FRAC);
-        const inside = (c: number, r: number) => (kind === 'profit' ? vals[r * cols + c] >= level : vals[r * cols + c] <= level);
-        const yOf = (c: number, r: number) => {
-          const a = vals[r * cols + c];
-          const b = vals[(r + 1) * cols + c];
-          return plotT + (r + 0.5 + (a - level) / (a - b)) * hc;
-        };
-        const colRuns = (c: number) => {
-          const out: [number, number][] = [];
-          let start: number | null = null;
-          for (let r = 0; r < rows; r++) {
-            if (inside(c, r)) start ??= r === 0 ? plotT : yOf(c, r - 1);
-            else if (start !== null) {
-              out.push([start, yOf(c, r - 1)]);
-              start = null;
-            }
-          }
-          if (start !== null) out.push([start, plotB]);
-          return out;
-        };
-        const cross: number[][] = [];
-        for (let c = 0; c <= cEx; c++) {
-          const ys: number[] = [];
-          for (let r = 0; r < rows - 1; r++) if (inside(c, r) !== inside(c, r + 1)) ys.push(yOf(c, r));
-          cross.push(ys);
-        }
-        const rgb = kind === 'profit' ? C.profit : C.loss;
-        const col = `rgb(${rgb.join(',')})`;
-        const cx = (c: number) => x0 + (c + 0.5) * hc;
-        // Runs where the extreme is reached (for the caption and compact marker), and at the last
-        // expiry (the outline's closing edge).
-        let atExpiry = colRuns(cRef);
-        const atEnd = colRuns(cEx);
-        dbg.zones.push({ kind, v, level, runs: atExpiry, t: xToT(cx(cRef)), cell: hc });
+        const sgn = kind === 'profit' ? 1 : -1;
+        const tEnd = Math.min(lastExp, xToT(plotR - 2));
+        const t0 = xToT(x0);
+        if (tEnd <= t0 || rows < 2) return;
 
-        // A zone only a few cells big can't be traced cleanly (it comes out as a hook or a jagged
-        // sliver), so mark it compactly instead: a bracket on the expiry line over the prices
-        // where the max is reached.
+        // Cells of the map inside the zone, and how wide it is: tiny zones get a compact marker.
         let cells = 0;
-        let firstCol = cEx;
-        for (let c = 0; c <= cEx; c++)
+        let firstCol = cols;
+        const cEnd = Math.min(cols - 1, Math.floor((tToX(tEnd) - x0) / hc));
+        for (let c = 0; c <= cEnd; c++)
           for (let r = 0; r < rows; r++)
-            if (inside(c, r)) {
+            if (sgn * (vals[r * cols + c] - level) >= 0) {
               cells++;
               firstCol = Math.min(firstCol, c);
             }
-        const zoneW = (cEx - firstCol + 1) * hc;
+        const zoneW = (cEnd - firstCol + 1) * hc;
         const areaPx = cells * hc * hc;
         let compact = cells > 0 && (zoneW < 40 || areaPx / zoneW < 12 || areaPx < 4000);
-        // A sharp peak (e.g. a butterfly at expiry) can be too narrow for the map's grid to show at
-        // all: mark the exact point instead, if it's on screen.
+
+        const cacheKey = `${heat.key}|${kind}|${level}|${tAt}|${compact}`;
+        let tr = zoneCacheRef.current.get(cacheKey);
+        if (!tr) {
+          tr = traceZone(!compact);
+          const cache = zoneCacheRef.current;
+          if (cache.size > 16) cache.clear();
+          cache.set(cacheKey, tr);
+        }
+
+        function traceZone(outline: boolean): ZoneTrace {
+          // While something is being dragged, trace a little coarser; the exact outline follows
+          // as soon as it's dropped.
+          const moving = hc === CELL_MOVING;
+          // >= 0 inside the zone. Evaluated with the exact P&L, not read off the map's grid.
+          const f = (y: number, t: number) => sgn * (pnlFn(yToP(y), t) - level);
+          const strikeYs = [...new Set(legsForPnl.map((l) => pToY(l.strike)))].filter((y) => y > plotT && y < plotB);
+          // Where P&L crosses the level at one moment: sign changes between sample prices (the
+          // map's row centres, plus the plot's top and bottom), each narrowed down by bisection.
+          const crossAt = (t: number, col?: number): { ys: number[]; topIn: boolean } => {
+            const ys: number[] = [];
+            const pts: [number, number][] = [[plotT, f(plotT, t)]];
+            for (let r = 0; r < rows; r++) {
+              const y = plotT + (r + 0.5) * hc;
+              if (y >= plotB) break;
+              pts.push([y, col === undefined ? f(y, t) : sgn * (vals[r * cols + col] - level)]);
+            }
+            pts.push([plotB, f(plotB, t)]);
+            // Also at every strike: payoffs peak and kink there, and a band around a kink can be
+            // thinner than the spacing above.
+            for (const y of strikeYs) pts.push([y, f(y, t)]);
+            if (strikeYs.length) pts.sort((p, q) => p[0] - q[0]);
+            for (let k = 0; k + 1 < pts.length; k++) {
+              let [a, fa] = pts[k];
+              let [b] = pts[k + 1];
+              if (fa >= 0 === pts[k + 1][1] >= 0) continue;
+              for (let it = 0; it < (moving ? 5 : 14); it++) {
+                const m = (a + b) / 2;
+                const fm = f(m, t);
+                if (fm >= 0 === fa >= 0) {
+                  a = m;
+                  fa = fm;
+                } else b = m;
+              }
+              ys.push((a + b) / 2);
+            }
+            return { ys, topIn: pts[0][1] >= 0 };
+          };
+
+          // Caption at the moment the extreme is reached if the zone shows there, else at the
+          // expiry nearest it where it shows (a spread's max is approached far off-screen well
+          // before expiry, but it's on screen at expiry), else the end of the visible map.
+          const clampT = (t: number) => Math.max(t0, Math.min(t, tEnd));
+          const candidates = [
+            tAt,
+            ...[...new Set(legsForPnl.map((l) => l.expiry))].filter((e) => e > t0 && e <= tEnd).sort((a, b) => Math.abs(a - tAt) - Math.abs(b - tAt)),
+            tEnd,
+          ].map(clampT);
+          let tRef = candidates[0];
+          let atExpiry = runsFrom(crossAt(tRef));
+          for (const t of candidates.slice(1)) {
+            if (atExpiry.length) break;
+            tRef = t;
+            atExpiry = runsFrom(crossAt(t));
+          }
+          const segs: number[][] = [];
+          if (!outline) return { segs, startRuns: [], endRuns: null, tRef, atExpiry };
+
+          // Moments to trace at: every map column up to the end, plus ever-closer steps into each
+          // expiry, where time value collapses and the boundary moves fastest.
+          const colDt = xToT(x0 + hc) - t0;
+          const samples: { t: number; col?: number }[] = [{ t: t0 }];
+          for (let c = 0; c < cols; c++) {
+            const t = xToT(x0 + (c + 0.5) * hc);
+            if (t >= tEnd) break;
+            samples.push({ t, col: c });
+          }
+          for (const e of new Set(legsForPnl.map((l) => l.expiry))) {
+            if (e <= t0 || e > tEnd + 1) continue;
+            for (let k = 0; k < (moving ? 8 : 22); k++) {
+              const d = colDt * 1.5 * (moving ? 0.5 : 0.65) ** k;
+              if (e - d > t0) samples.push({ t: e - d });
+              // Just after an expiry too: the expired legs leave a kink the boundary can bend round.
+              if (e + d < tEnd && k < (moving ? 2 : 10)) samples.push({ t: e + d });
+            }
+            samples.push({ t: e });
+          }
+          if (tEnd < lastExp) samples.push({ t: tEnd });
+          samples.sort((a, b) => a.t - b.t);
+          const traced = samples.map((sm) => ({ x: tToX(sm.t), t: sm.t, ...crossAt(sm.t, sm.col) }));
+
+          const seg = (x1: number, y1: number, x2: number, y2: number) => segs.push([x1, y1, x2, y2]);
+          // Join each crossing to its partner at the next moment: mutual nearest neighbours, so two
+          // separate boundaries are never bridged.
+          const nearestIn = (ys: number[], y: number) => {
+            let best = -1;
+            for (let k = 0; k < ys.length; k++) if (best < 0 || Math.abs(ys[k] - y) < Math.abs(ys[best] - y)) best = k;
+            return best;
+          };
+          const maxJump = (plotB - plotT) * 0.25;
+          type Traced = (typeof traced)[number];
+          // A boundary pair that ends (or starts) between two moments is a tip of the zone. Find
+          // the moment it closes by bisection, then walk in with steps that halve towards it (the
+          // boundary bends sharply there, like a sideways parabola) rather than cutting across.
+          const tips = (ys: number[], linked: Set<number>, from: Traced, to: Traced) => {
+            for (let k = 0; k + 1 < ys.length; k++) {
+              if (linked.has(k) || linked.has(k + 1)) continue;
+              if (Math.abs(ys[k + 1] - ys[k]) > maxJump) continue;
+              let lo = from.t;
+              let hi = to.t;
+              let [y1, y2] = [ys[k], ys[k + 1]];
+              for (let it = 0; it < (moving ? 4 : 12); it++) {
+                const mid = (lo + hi) / 2;
+                const cs = crossAt(mid).ys;
+                const i1 = nearestIn(cs, y1);
+                const i2 = nearestIn(cs, y2);
+                const reach = Math.max(hc * 2, Math.abs(y2 - y1));
+                if (i1 >= 0 && i2 >= 0 && i1 !== i2 && Math.abs(cs[i1] - y1) < reach && Math.abs(cs[i2] - y2) < reach) {
+                  lo = mid;
+                  [y1, y2] = [cs[i1], cs[i2]];
+                } else hi = mid;
+              }
+              const tStar = (lo + hi) / 2;
+              let p1: [number, number] = [from.x, ys[k]];
+              let p2: [number, number] = [from.x, ys[k + 1]];
+              for (let m = 1; m <= (moving ? 1 : 10); m++) {
+                const t = tStar + (from.t - tStar) * 0.5 ** m;
+                const cs = crossAt(t).ys;
+                const i1 = nearestIn(cs, p1[1]);
+                const i2 = nearestIn(cs, p2[1]);
+                if (i1 < 0 || i2 < 0 || i1 === i2) break;
+                const x = tToX(t);
+                seg(p1[0], p1[1], x, cs[i1]);
+                seg(p2[0], p2[1], x, cs[i2]);
+                p1 = [x, cs[i1]];
+                p2 = [x, cs[i2]];
+              }
+              const tip: [number, number] = [tToX(tStar), (p1[1] + p2[1]) / 2];
+              seg(p1[0], p1[1], tip[0], tip[1]);
+              seg(p2[0], p2[1], tip[0], tip[1]);
+              linked.add(k).add(k + 1);
+            }
+          };
+          // Where the boundary moves steeply between two moments (a straight line would cut the
+          // corner), add the moment halfway and recurse.
+          const link = (ta: number, ya: number, tb: number, yb: number, depth: number) => {
+            if (depth > 0 && Math.abs(yb - ya) > 2 && tToX(tb) - tToX(ta) > 0.01) {
+              const tm = (ta + tb) / 2;
+              const cs = crossAt(tm).ys;
+              const i = nearestIn(cs, (ya + yb) / 2);
+              if (i >= 0 && cs[i] >= Math.min(ya, yb) - 2 && cs[i] <= Math.max(ya, yb) + 2) {
+                link(ta, ya, tm, cs[i], depth - 1);
+                link(tm, cs[i], tb, yb, depth - 1);
+                return;
+              }
+            }
+            seg(tToX(ta), ya, tToX(tb), yb);
+          };
+          for (let i = 0; i + 1 < traced.length; i++) {
+            const a = traced[i];
+            const b = traced[i + 1];
+            const linkedA = new Set<number>();
+            const linkedB = new Set<number>();
+            a.ys.forEach((y, k) => {
+              const m = nearestIn(b.ys, y);
+              if (m < 0 || nearestIn(a.ys, b.ys[m]) !== k || Math.abs(b.ys[m] - y) > maxJump) return;
+              link(a.t, y, b.t, b.ys[m], moving ? 0 : 7);
+              linkedA.add(k);
+              linkedB.add(m);
+            });
+            tips(a.ys, linkedA, a, b);
+            tips(b.ys, linkedB, b, a);
+            // A boundary that leaves through the top or bottom of the plot between two moments:
+            // follow it with ever-closer steps until it's off the edge.
+            const exit = (ys: number[], linked: Set<number>, from: Traced, to: Traced) => {
+              ys.forEach((y, k) => {
+                if (linked.has(k)) return;
+                let p: [number, number] = [from.x, y];
+                for (let m = 1; m <= (moving ? 1 : 10); m++) {
+                  const t = from.t + (to.t - from.t) * (1 - 0.5 ** m);
+                  const cs = crossAt(t).ys;
+                  const i = nearestIn(cs, p[1]);
+                  if (i < 0 || Math.abs(cs[i] - p[1]) > Math.max(hc * 3, Math.min(p[1] - plotT, plotB - p[1]) + 2)) break;
+                  const x = tToX(t);
+                  seg(p[0], p[1], x, cs[i]);
+                  p = [x, cs[i]];
+                }
+                const edgeY = p[1] - plotT < plotB - p[1] ? plotT : plotB;
+                if (Math.abs(edgeY - p[1]) < hc * 2) seg(p[0], p[1], p[0], edgeY);
+              });
+            };
+            exit(a.ys, linkedA, a, b);
+            exit(b.ys, linkedB, b, a);
+          }
+          // Closing edges: the start of the map if the zone is already there, and the last expiry
+          // (only when it's on screen; otherwise the zone carries on past the edge).
+          return {
+            segs,
+            startRuns: runsFrom(traced[0]),
+            endRuns: tEnd >= lastExp ? runsFrom(traced[traced.length - 1]) : null,
+            tRef,
+            atExpiry,
+          };
+        }
+
+        function runsFrom({ ys, topIn }: { ys: number[]; topIn: boolean }) {
+          const out: [number, number][] = [];
+          let inside = topIn;
+          let start = plotT;
+          for (const y of ys) {
+            if (inside) out.push([start, y]);
+            else start = y;
+            inside = !inside;
+          }
+          if (inside) out.push([start, plotB]);
+          return out;
+        }
+
+        const rgb = kind === 'profit' ? C.profit : C.loss;
+        const col = `rgb(${rgb.join(',')})`;
+        const { tRef, segs } = tr;
+        let atExpiry = tr.atExpiry;
+        const xRef = Math.round(tToX(tRef));
+        dbg.zones.push({ kind, v, level, runs: atExpiry, t: tRef, cell: hc, segs: compact ? undefined : segs });
+        // A sharp peak (e.g. a butterfly at expiry) can be too narrow to show at all: mark the exact
+        // point instead, if it's on screen.
         const yAt = pToY(sAt);
-        if (!atExpiry.length && yAt > plotT && yAt < plotB) {
+        if (!atExpiry.length && yAt > plotT && yAt < plotB && tAt <= tEnd) {
           atExpiry = [[yAt, yAt]];
           compact = true;
         }
-        Object.assign(dbg.zones[dbg.zones.length - 1], { cells, width: zoneW, compact });
+        Object.assign(dbg.zones[dbg.zones.length - 1], { cells, width: zoneW, compact, runs: atExpiry });
 
         if (compact) {
           // A soft capsule on the expiry line over the prices where the max is reached.
@@ -741,46 +953,32 @@ export function Chart(props: Props) {
             ctx.lineWidth = 1;
             ctx.stroke();
           }
-        }
-        if (!compact) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(x0, plotT, xLast - x0 + 1, plotB - plotT);
-        ctx.clip();
-        ctx.strokeStyle = `rgba(${rgb.join(',')},0.95)`;
-        ctx.lineWidth = 1.5;
-        ctx.lineJoin = 'round';
-        ctx.beginPath();
-        for (let c = 0; c < cEx; c++) {
-          for (const y of cross[c]) {
-            let best: number | null = null;
-            for (const y2 of cross[c + 1]) if (best === null || Math.abs(y2 - y) < Math.abs(best - y)) best = y2;
-            if (best !== null && Math.abs(best - y) < hc * 6) {
-              ctx.moveTo(cx(c), y);
-              ctx.lineTo(cx(c + 1), best);
-            }
+        } else {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x0, plotT, tToX(tEnd) - x0 + 1, plotB - plotT);
+          ctx.clip();
+          ctx.strokeStyle = `rgba(${rgb.join(',')},0.95)`;
+          ctx.lineWidth = 1.5;
+          ctx.lineJoin = 'round';
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          for (const [x1, y1, x2, y2] of segs) {
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
           }
-        }
-        for (const y of cross[0]) {
-          ctx.moveTo(x0, y);
-          ctx.lineTo(cx(0), y);
-        }
-        for (const y of cross[cEx]) {
-          ctx.moveTo(cx(cEx), y);
-          ctx.lineTo(xLast, y);
-        }
-        // Closing edges: the expiry line, and "now" if you're already in the zone.
-        for (const [a, b] of atEnd) {
-          ctx.moveTo(xLast, a);
-          ctx.lineTo(xLast, b);
-        }
-        for (const [a, b] of colRuns(0)) {
-          ctx.moveTo(x0 + 0.75, a);
-          ctx.lineTo(x0 + 0.75, b);
-        }
-        ctx.stroke();
-        ctx.restore();
-        ctx.lineWidth = 1;
+          for (const [a, b] of tr.startRuns) {
+            ctx.moveTo(x0 + 0.75, a);
+            ctx.lineTo(x0 + 0.75, b);
+          }
+          for (const [a, b] of tr.endRuns ?? []) {
+            ctx.moveTo(tToX(lastExp), a);
+            ctx.lineTo(tToX(lastExp), b);
+          }
+          ctx.stroke();
+          ctx.restore();
+          ctx.lineWidth = 1;
+          ctx.lineCap = 'butt';
         }
         if (!atExpiry.length) return;
 
@@ -806,7 +1004,9 @@ export function Chart(props: Props) {
               ? y1 - 10
               : y0 + 12;
         ctx.font = `600 10.5px ${MONO}`;
-        const full = mixedExpiry ? `${title} · ${where} on ${fmtTime(tAt, false)}` : `${title} · ${where}`;
+        // Name the date when it isn't the (only) expiry: mixed expiries, or the expiry is past the
+        // right edge and the zone is described where the chart ends.
+        const full = mixedExpiry || tRef < lastExp - 60_000 ? `${title} · ${where} on ${fmtTime(tRef, false)}` : `${title} · ${where}`;
         const text = ctx.measureText(full).width < xRef - nowX - 16 ? full : title;
         const tw = ctx.measureText(text).width;
         const tx = Math.max(nowX + 6, xRef - (compact ? 12 : 8) - tw);
@@ -818,6 +1018,7 @@ export function Chart(props: Props) {
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillText(text, tx, ty + 0.5);
+        dbg.zones[dbg.zones.length - 1].labelled = true;
       };
 
       if (maxP > tol && !unlimitedProfit) drawZone('profit', maxP, ext.maxT, ext.maxS);

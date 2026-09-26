@@ -67,8 +67,11 @@ export function createMockSource(): MarketSource {
   const now = Date.now();
   const markets = { ETH: mockMarket('ETH', now), BTC: mockMarket('BTC', now) };
   const listeners = new Set<() => void>();
-  // One random-walk step per second per asset.
+  // One random-walk step per second per asset. `?freeze=1` holds prices still (the chart check
+  // uses it so a failing case can be replayed exactly).
+  const frozen = typeof location !== 'undefined' && new URLSearchParams(location.search).get('freeze') === '1';
   const timer = setInterval(() => {
+    if (frozen) return;
     const t = Date.now();
     markets.ETH.tick(t);
     markets.BTC.tick(t);
