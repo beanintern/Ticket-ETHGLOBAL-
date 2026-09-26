@@ -485,6 +485,9 @@ export default function App() {
             <span>
               <i className="sw sw-be" /> Break-even
             </span>
+            <span>
+              <i className="sw sw-open" /> Uncapped loss
+            </span>
             <span className="hint">
               Click an expiry column to add a leg · drag legs to move · right-click to remove · scroll to zoom time, shift-scroll or drag the price axis for price
             </span>

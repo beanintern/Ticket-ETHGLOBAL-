@@ -100,6 +100,14 @@ function Builder({ spec, spot, now, builderLegs: legs, builderModel: model, sele
         </div>
       ) : (
         <>
+          <div className="risk" aria-label="Risk profile">
+            <span className={`risk-chip ${summary.unlimitedLoss ? 'is-bad' : summary.lossToZero ? 'is-warn' : 'is-ok'}`}>
+              {summary.unlimitedLoss ? 'Loss uncapped' : summary.lossToZero ? 'Loss capped only at $0' : 'Loss capped'}
+            </span>
+            <span className={`risk-chip ${summary.unlimitedProfit ? 'is-good' : ''}`}>
+              {summary.unlimitedProfit ? 'Profit uncapped' : 'Profit capped'}
+            </span>
+          </div>
           <dl className="summary">
             <div>
               <dt>{debit >= 0 ? 'Net debit' : 'Net credit'}</dt>
@@ -115,7 +123,10 @@ function Builder({ spec, spot, now, builderLegs: legs, builderModel: model, sele
             </div>
             <div>
               <dt>Max loss</dt>
-              <dd className="num down">{summary.unlimitedLoss ? 'Unlimited' : ccy(Math.min(0, summary.maxLoss))}</dd>
+              <dd className="num down">
+                {summary.unlimitedLoss ? 'Unlimited' : ccy(Math.min(0, summary.maxLoss))}
+                {summary.lossToZero && !summary.unlimitedLoss && <small> if {spec.asset} → 0</small>}
+              </dd>
             </div>
             <div className="wide">
               <dt>Break-even at {expiryLabel(summary.horizon)}</dt>

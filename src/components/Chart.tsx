@@ -613,6 +613,113 @@ export function Chart(props: Props) {
         const lab = rs.length ? nearest(rs) : null;
         for (const r of rs) drawCap(r, minP, 'loss', r === lab);
       }
+
+      // ---- Open-ended tails ----
+      // Past the outermost strike the payoff is a straight line. If it keeps falling, the loss has
+      // no cap (upside) or only stops at a price of zero (downside): hatch that zone so it can't be
+      // mistaken for a capped one, and tag which way it runs.
+      const strikes = legsForPnl.map((l) => l.strike);
+      const kMax = Math.max(...strikes);
+      const kMin = Math.min(...strikes);
+      const lowTail = pnlFn(spot * 0.02, firstExp) - pnlFn(spot * 0.04, firstExp);
+      const downLoss = lowTail < -1e-6 * spot;
+      const downProfit = lowTail > 1e-6 * spot;
+      const atZero = pnlFn(spot * 1e-4, firstExp);
+      const hatch = (y0: number, y1: number) => {
+        if (y1 - y0 < 2) return;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(nowX, y0, ex - nowX, y1 - y0);
+        ctx.clip();
+        ctx.strokeStyle = `rgba(${C.loss.join(',')},0.5)`;
+        ctx.lineWidth = 1.25;
+        ctx.beginPath();
+        const hgt = y1 - y0;
+        for (let k = -hgt; k < ex - nowX; k += 9) {
+          ctx.moveTo(nowX + k, y1);
+          ctx.lineTo(nowX + k + hgt, y0);
+        }
+        ctx.stroke();
+        ctx.restore();
+      };
+      const tag = (dir: 'up' | 'down', kind: 'profit' | 'loss', title: string, sub: string) => {
+        const rgb = kind === 'profit' ? C.profit : C.loss;
+        const col = `rgb(${rgb.join(',')})`;
+        // The zone starts where the payoff turns to this kind past the outermost strike (the
+        // expiry break-even), not at the strike itself.
+        const k0 = dir === 'up' ? kMax : kMin;
+        const hit = (S: number) => (kind === 'loss' ? pnlFn(S, firstExp) < 0 : pnlFn(S, firstExp) > 0);
+        let edgeP = k0;
+        let prev = k0;
+        for (let i = 0; i <= 400; i++) {
+          const S = dir === 'up' ? k0 * (1 + 2 * (i / 400)) : k0 * (1 - 0.999 * (i / 400));
+          if (hit(S)) {
+            // Narrow down to the exact break-even between the last two samples.
+            let lo = prev;
+            let hi = S;
+            for (let j = 0; j < 30; j++) {
+              const mid = (lo + hi) / 2;
+              if (hit(mid)) hi = mid;
+              else lo = mid;
+            }
+            edgeP = hi;
+            break;
+          }
+          prev = S;
+        }
+        const edgeY = pToY(edgeP);
+        const y0 = dir === 'up' ? plotT : Math.max(plotT, edgeY);
+        const y1 = dir === 'up' ? Math.min(plotB, edgeY) : plotB;
+        if (kind === 'loss') hatch(y0, y1);
+        // Solid edge where the open-ended zone starts, if it's on screen.
+        if (edgeY > plotT && edgeY < plotB) {
+          ctx.strokeStyle = `rgba(${rgb.join(',')},0.8)`;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(nowX, Math.round(edgeY) + 0.5);
+          ctx.lineTo(ex, Math.round(edgeY) + 0.5);
+          ctx.stroke();
+          ctx.lineWidth = 1;
+        }
+        ctx.font = `600 11px ${MONO}`;
+        const tw = ctx.measureText(title).width;
+        ctx.font = `11px ${SANS}`;
+        const w2 = Math.max(tw + 16, ctx.measureText(sub).width) + 18;
+        const right = ex + 14 + w2 < plotR;
+        const lx = right ? ex + 14 : Math.max(4, ex - 14 - w2);
+        const ly = dir === 'up' ? plotT + 8 : plotB - 44;
+        roundRect(ctx, lx, ly, w2, 36, 5);
+        ctx.fillStyle = 'rgba(12,15,20,0.92)';
+        ctx.fill();
+        ctx.strokeStyle = col;
+        ctx.stroke();
+        // Arrow: which way the payoff keeps going.
+        ctx.fillStyle = col;
+        ctx.beginPath();
+        const ax = lx + 13;
+        const ay = ly + 12;
+        if (dir === 'up') {
+          ctx.moveTo(ax - 5, ay + 4);
+          ctx.lineTo(ax + 5, ay + 4);
+          ctx.lineTo(ax, ay - 5);
+        } else {
+          ctx.moveTo(ax - 5, ay - 4);
+          ctx.lineTo(ax + 5, ay - 4);
+          ctx.lineTo(ax, ay + 5);
+        }
+        ctx.fill();
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.font = `600 11px ${MONO}`;
+        ctx.fillText(title, lx + 24, ly + 12);
+        ctx.font = `11px ${SANS}`;
+        ctx.fillStyle = C.muted;
+        ctx.fillText(sub.replace('{edge}', fmtPrice(edgeP, 0)), lx + 9, ly + 26);
+      };
+      if (unlimitedLoss) tag('up', 'loss', 'LOSS UNCAPPED', 'loses above {edge}, no limit');
+      else if (unlimitedProfit) tag('up', 'profit', 'PROFIT UNCAPPED', 'profits above {edge}, no limit');
+      if (downLoss) tag('down', 'loss', `LOSS GROWS TO ${signedUsd(atZero, 0)}`, `loses below {edge}, worst if ${spec.asset} hits 0`);
+      else if (downProfit) tag('down', 'profit', `PROFIT UP TO ${signedUsd(atZero, 0)}`, `profits below {edge}, best if ${spec.asset} hits 0`);
     }
 
     // ---- Leg markers ----

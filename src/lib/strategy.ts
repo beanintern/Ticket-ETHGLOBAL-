@@ -75,6 +75,8 @@ export interface Summary {
   maxLoss: number;
   unlimitedProfit: boolean;
   unlimitedLoss: boolean;
+  /** Loss keeps growing as price falls, until it reaches zero (e.g. a short put). */
+  lossToZero: boolean;
   breakevens: number[];
   pop: number;
   greeks: Greeks;
@@ -89,6 +91,7 @@ export function summarize(model: Model, spec: MarketSpec, spot: number, now: num
   const N = 900;
   for (let i = 0; i <= N; i++) grid.push(spot * Math.exp(Math.log(0.15) + (Math.log(5) - Math.log(0.15)) * (i / N)));
   for (const l of legs) grid.push(l.strike);
+  grid.push(spot * 1e-4); // payoffs that only stop at a price of zero
   grid.sort((a, b) => a - b);
   const vals = grid.map((S) => model.pnl(S, horizon));
 
@@ -103,6 +106,7 @@ export function summarize(model: Model, spec: MarketSpec, spot: number, now: num
   const eps = 1e-6 * spot;
   const unlimitedProfit = far2 - far1 > eps;
   const unlimitedLoss = far1 - far2 > eps;
+  const lossToZero = model.pnl(spot * 0.02, horizon) - model.pnl(spot * 0.04, horizon) < -eps;
 
   const breakevens: number[] = [];
   for (let i = 1; i < vals.length; i++) {
@@ -137,7 +141,7 @@ export function summarize(model: Model, spec: MarketSpec, spot: number, now: num
     greeks.vega += k * g.vega;
   });
 
-  return { horizon, maxProfit, maxLoss, unlimitedProfit, unlimitedLoss, breakevens, pop, greeks };
+  return { horizon, maxProfit, maxLoss, unlimitedProfit, unlimitedLoss, lossToZero, breakevens, pop, greeks };
 }
 
 const fmtK = (k: number) => (k >= 10000 ? `${+(k / 1000).toFixed(1)}k` : `${k}`);
