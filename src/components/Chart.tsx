@@ -79,6 +79,8 @@ const NARROW_W = 600;
 const TOUCH_SLACK = 10;
 /** How long a finger must rest before a press counts as a long-press. */
 const LONG_PRESS_MS = 450;
+/** The max profit / max loss outline covers P&L within this fraction of the max. */
+export const ZONE_FRAC = 0.05;
 const TIME_H = 26;
 const TOP_H = 28;
 const PAST_FRAC = 0.3;
@@ -616,19 +618,6 @@ export function Chart(props: Props) {
         visMin = Math.min(visMin, v);
       }
       const tol = Math.max(0, visMax - visMin) * 0.004 + 1e-6;
-      const runs = (pred: (v: number) => boolean) => {
-        const out: [number, number][] = [];
-        let start: number | null = null;
-        for (const [y, v] of samples) {
-          if (pred(v)) start ??= y;
-          else if (start !== null) {
-            out.push([start, y - 2]);
-            start = null;
-          }
-        }
-        if (start !== null) out.push([start, samples[samples.length - 1][0]]);
-        return out;
-      };
       const strikeLabel = (y: number) => {
         const p = yToP(y);
         const k = legsForPnl.reduce((a, l) => (Math.abs(l.strike - p) < Math.abs(a - p) ? l.strike : a), legsForPnl[0].strike);
@@ -704,23 +693,128 @@ export function Chart(props: Props) {
         ctx.textBaseline = 'middle';
         ctx.fillText(text, tx, ty + 0.5);
       };
-      // Outline every plateau, but caption only the one nearest spot so repeated peaks don't stack text.
       const nearest = (rs: [number, number][]) =>
         rs.reduce((a, r) => (Math.abs((r[0] + r[1]) / 2 - spotY) < Math.abs((a[0] + a[1]) / 2 - spotY) ? r : a), rs[0]);
+
+      // Outline where the P&L is actually within ZONE_FRAC of its max (or max loss), traced on the
+      // map itself. Max profit/loss is only reached at expiry, so this is a wedge that widens
+      // toward the expiry, not a box starting at "now".
+      const drawZone = (kind: 'profit' | 'loss', v: number) => {
+        const heat = heatRef.current;
+        if (!heat) return;
+        const { vals, cols, rows, cell: hc, x0 } = heat;
+        const cEx = Math.min(cols - 1, Math.floor((ex - x0) / hc));
+        if (cEx < 0 || rows < 2) return;
+        const level = v * (1 - ZONE_FRAC);
+        const inside = (c: number, r: number) => (kind === 'profit' ? vals[r * cols + c] >= level : vals[r * cols + c] <= level);
+        const yOf = (c: number, r: number) => {
+          const a = vals[r * cols + c];
+          const b = vals[(r + 1) * cols + c];
+          return plotT + (r + 0.5 + (a - level) / (a - b)) * hc;
+        };
+        const colRuns = (c: number) => {
+          const out: [number, number][] = [];
+          let start: number | null = null;
+          for (let r = 0; r < rows; r++) {
+            if (inside(c, r)) start ??= r === 0 ? plotT : yOf(c, r - 1);
+            else if (start !== null) {
+              out.push([start, yOf(c, r - 1)]);
+              start = null;
+            }
+          }
+          if (start !== null) out.push([start, plotB]);
+          return out;
+        };
+        const cross: number[][] = [];
+        for (let c = 0; c <= cEx; c++) {
+          const ys: number[] = [];
+          for (let r = 0; r < rows - 1; r++) if (inside(c, r) !== inside(c, r + 1)) ys.push(yOf(c, r));
+          cross.push(ys);
+        }
+        const rgb = kind === 'profit' ? C.profit : C.loss;
+        const col = `rgb(${rgb.join(',')})`;
+        const cx = (c: number) => x0 + (c + 0.5) * hc;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x0, plotT, ex - x0 + 1, plotB - plotT);
+        ctx.clip();
+        ctx.strokeStyle = `rgba(${rgb.join(',')},0.95)`;
+        ctx.lineWidth = 1.5;
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        for (let c = 0; c < cEx; c++) {
+          for (const y of cross[c]) {
+            let best: number | null = null;
+            for (const y2 of cross[c + 1]) if (best === null || Math.abs(y2 - y) < Math.abs(best - y)) best = y2;
+            if (best !== null && Math.abs(best - y) < hc * 6) {
+              ctx.moveTo(cx(c), y);
+              ctx.lineTo(cx(c + 1), best);
+            }
+          }
+        }
+        for (const y of cross[0]) {
+          ctx.moveTo(x0, y);
+          ctx.lineTo(cx(0), y);
+        }
+        for (const y of cross[cEx]) {
+          ctx.moveTo(cx(cEx), y);
+          ctx.lineTo(ex, y);
+        }
+        // Closing edges: the expiry line, and "now" if you're already in the zone.
+        const atExpiry = colRuns(cEx);
+        for (const [a, b] of atExpiry) {
+          ctx.moveTo(ex, a);
+          ctx.lineTo(ex, b);
+        }
+        for (const [a, b] of colRuns(0)) {
+          ctx.moveTo(x0 + 0.75, a);
+          ctx.lineTo(x0 + 0.75, b);
+        }
+        ctx.stroke();
+        ctx.restore();
+        ctx.lineWidth = 1;
+        if (!atExpiry.length) return;
+
+        // Caption the zone nearest spot, inside its closed edge at expiry.
+        const [y0, y1] = nearest(atExpiry);
+        const atTop = y0 <= plotT + 1;
+        const atBottom = y1 >= plotB - 1;
+        let where: string;
+        if (atTop && atBottom) where = 'across this range';
+        else if (y1 - y0 < 8) where = `at ${strikeLabel((y0 + y1) / 2)}`;
+        else if (atTop) where = `above ${strikeLabel(y1)}`;
+        else if (atBottom) where = `below ${strikeLabel(y0)}`;
+        else where = `${strikeLabel(y1)} – ${strikeLabel(y0)}`;
+        const title = `${kind === 'profit' ? 'MAX PROFIT' : 'MAX LOSS'} ${signedUsd(v)}`;
+        const capY = !atTop ? (y1 - y0 >= 22 ? y0 + 12 : y0 - 10) : !atBottom ? y1 - 10 : y0 + 12;
+        ctx.font = `600 10.5px ${MONO}`;
+        const full = `${title} · ${where}`;
+        const text = ctx.measureText(full).width < ex - nowX - 16 ? full : title;
+        const tw = ctx.measureText(text).width;
+        const tx = Math.max(nowX + 6, ex - 8 - tw);
+        const ty = Math.max(plotT + 8, Math.min(plotB - 8, capY));
+        ctx.fillStyle = 'rgba(12,15,20,0.72)';
+        ctx.fillRect(tx - 4, ty - 8, tw + 8, 16);
+        ctx.fillStyle = col;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, tx, ty + 0.5);
+      };
+
       if (maxP > tol && !unlimitedProfit) {
-        const rs = mixedExpiry ? [] : runs((v) => v >= maxP - tol);
-        // A sharp peak at a single strike (no flat run to find): mark it at that strike.
-        const py = pToY(maxS);
-        if (!rs.length && py > plotT && py < plotB) rs.push([py, py]);
-        const lab = rs.length ? nearest(rs) : null;
-        for (const r of rs) drawCap(r, maxP, 'profit', r === lab);
+        if (!mixedExpiry) drawZone('profit', maxP);
+        else {
+          // Mixed expiries: a soft peak, so mark the best point instead.
+          const py = pToY(maxS);
+          if (py > plotT && py < plotB) drawCap([py, py], maxP, 'profit', true);
+        }
       }
       if (minP < -tol && !unlimitedLoss) {
-        const rs = mixedExpiry ? [] : runs((v) => v <= minP + tol);
-        const my = pToY(minS);
-        if (!rs.length && my > plotT && my < plotB) rs.push([my, my]);
-        const lab = rs.length ? nearest(rs) : null;
-        for (const r of rs) drawCap(r, minP, 'loss', r === lab);
+        if (!mixedExpiry) drawZone('loss', minP);
+        else {
+          const my = pToY(minS);
+          if (my > plotT && my < plotB) drawCap([my, my], minP, 'loss', true);
+        }
       }
 
       // ---- Open-ended tails ----

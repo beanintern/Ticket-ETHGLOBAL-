@@ -117,6 +117,7 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .sw-profit { background: var(--profit); }
 .sw-loss { background: var(--loss); }
 .sw-be { height: 2px; width: 12px; background: var(--text); vertical-align: 3px; }
+.sw-zone { background: transparent; border: 1.5px solid var(--profit); border-right-color: var(--loss); border-bottom-color: var(--loss); }
 .sw-open { background: repeating-linear-gradient(135deg, var(--loss) 0 1.5px, transparent 1.5px 4px); outline: 1px solid var(--loss); outline-offset: -1px; }
 
 /* ---- Sidebar ---- */
