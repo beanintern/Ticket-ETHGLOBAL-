@@ -349,9 +349,19 @@ export function Chart(props: Props) {
         const img = octx.createImageData(cols, rows);
         const contour: number[][] = [];
         if (mx > 1e-9) {
+          // Profit and loss each get their own scale (with a floor at 20% of the larger side), so a
+          // small loss next to a big uncapped profit is still clearly red instead of near-black.
+          let maxPos = 0;
+          let maxNeg = 0;
+          for (let i = 0; i < vals.length; i++) {
+            if (vals[i] > maxPos) maxPos = vals[i];
+            else if (-vals[i] > maxNeg) maxNeg = -vals[i];
+          }
+          const posScale = Math.max(maxPos, mx * 0.2);
+          const negScale = Math.max(maxNeg, mx * 0.2);
           for (let i = 0; i < vals.length; i++) {
             const v = vals[i];
-            const a = Math.pow(Math.abs(v) / mx, 0.75);
+            const a = Math.pow(Math.abs(v) / (v >= 0 ? posScale : negScale), 0.75);
             const rgb = v >= 0 ? C.profit : C.loss;
             img.data[i * 4] = rgb[0];
             img.data[i * 4 + 1] = rgb[1];
@@ -578,17 +588,31 @@ export function Chart(props: Props) {
       const ex = Math.round(Math.min(tToX(firstExp), plotR - 2));
       let maxP = -Infinity;
       let minP = Infinity;
-      for (let i = 0; i <= 600; i++) {
-        const v = pnlFn(spot * Math.exp(Math.log(0.05) + Math.log(400) * (i / 600)), firstExp);
-        maxP = Math.max(maxP, v);
-        minP = Math.min(minP, v);
+      // Sample a wide price range plus every strike exactly: payoffs have sharp corners at the
+      // strikes, and a grid alone can step over a peak or trough (the Build panel checks strikes too).
+      const probe = [...legsForPnl.map((l) => l.strike)];
+      for (let i = 0; i <= 600; i++) probe.push(spot * Math.exp(Math.log(0.05) + Math.log(400) * (i / 600)));
+      let maxS = spot;
+      let minS = spot;
+      for (const S of probe) {
+        const v = pnlFn(S, firstExp);
+        if (v > maxP) [maxP, maxS] = [v, S];
+        if (v < minP) [minP, minS] = [v, S];
       }
       const tail = pnlFn(spot * 40, firstExp) - pnlFn(spot * 20, firstExp);
       const unlimitedProfit = tail > 1e-6 * spot;
       const unlimitedLoss = tail < -1e-6 * spot;
-      const tol = (maxP - minP) * 0.004 + 1e-6;
       const samples: [number, number][] = [];
       for (let y = plotT; y <= plotB; y += 2) samples.push([y, pnlFn(yToP(y), firstExp)]);
+      // "Flat" is judged against what's on screen: using the far-off-screen range (up to 20x spot)
+      // made the tolerance so wide that a small capped loss next to uncapped profit never counted.
+      let visMax = -Infinity;
+      let visMin = Infinity;
+      for (const [, v] of samples) {
+        visMax = Math.max(visMax, v);
+        visMin = Math.min(visMin, v);
+      }
+      const tol = Math.max(0, visMax - visMin) * 0.004 + 1e-6;
       const runs = (pred: (v: number) => boolean) => {
         const out: [number, number][] = [];
         let start: number | null = null;
@@ -641,7 +665,8 @@ export function Chart(props: Props) {
 
         if (!withLabel) return;
         const title = `${kind === 'profit' ? 'MAX PROFIT' : 'MAX LOSS'} ${signedUsd(v)}`;
-        const sub = kind === 'profit' ? `capped ${where}` : `limited ${where}`;
+        const point = where.startsWith('at ');
+        const sub = kind === 'profit' ? `${point ? 'best' : 'capped'} ${where}` : `${point ? 'worst' : 'limited'} ${where}`;
         ctx.font = `600 11px ${MONO}`;
         const tw = ctx.measureText(title).width;
         ctx.font = `11px ${SANS}`;
@@ -668,11 +693,16 @@ export function Chart(props: Props) {
         rs.reduce((a, r) => (Math.abs((r[0] + r[1]) / 2 - spotY) < Math.abs((a[0] + a[1]) / 2 - spotY) ? r : a), rs[0]);
       if (maxP > tol && !unlimitedProfit) {
         const rs = runs((v) => v >= maxP - tol);
+        // A sharp peak at a single strike (no flat run to find): mark it at that strike.
+        const py = pToY(maxS);
+        if (!rs.length && py > plotT && py < plotB) rs.push([py, py]);
         const lab = rs.length ? nearest(rs) : null;
         for (const r of rs) drawCap(r, maxP, 'profit', r === lab);
       }
       if (minP < -tol && !unlimitedLoss) {
         const rs = runs((v) => v <= minP + tol);
+        const my = pToY(minS);
+        if (!rs.length && my > plotT && my < plotB) rs.push([my, my]);
         const lab = rs.length ? nearest(rs) : null;
         for (const r of rs) drawCap(r, minP, 'loss', r === lab);
       }
