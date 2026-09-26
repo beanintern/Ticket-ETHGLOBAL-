@@ -97,9 +97,17 @@ export function summarize(model: Model, spec: MarketSpec, spot: number, now: num
 
   let maxProfit = -Infinity;
   let maxLoss = Infinity;
-  for (const v of vals) {
-    maxProfit = Math.max(maxProfit, v);
-    maxLoss = Math.min(maxLoss, v);
+  let maxS = spot;
+  let minS = spot;
+  vals.forEach((v, i) => {
+    if (v > maxProfit) [maxProfit, maxS] = [v, grid[i]];
+    if (v < maxLoss) [maxLoss, minS] = [v, grid[i]];
+  });
+  // Soft peaks (legs on several dates) fall between grid points: zoom in around each extreme.
+  for (let i = -100; i <= 100; i++) {
+    const f = Math.exp(0.01 * (i / 100));
+    maxProfit = Math.max(maxProfit, model.pnl(maxS * f, horizon));
+    maxLoss = Math.min(maxLoss, model.pnl(minS * f, horizon));
   }
   const far1 = model.pnl(spot * 20, horizon);
   const far2 = model.pnl(spot * 40, horizon);

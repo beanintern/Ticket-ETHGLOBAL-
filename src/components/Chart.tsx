@@ -607,10 +607,18 @@ export function Chart(props: Props) {
       // (and a price near zero, where puts reach their extremes, as the Build panel does)
       const probe = [...legsForPnl.map((l) => l.strike), spot * 1e-4];
       for (let i = 0; i <= 600; i++) probe.push(spot * Math.exp(Math.log(0.05) + Math.log(400) * (i / 600)));
+      let maxS = spot;
+      let minS = spot;
       for (const S of probe) {
         const v = pnlFn(S, firstExp);
-        maxP = Math.max(maxP, v);
-        minP = Math.min(minP, v);
+        if (v > maxP) [maxP, maxS] = [v, S];
+        if (v < minP) [minP, minS] = [v, S];
+      }
+      // Soft peaks (legs on several dates) fall between grid points: zoom in around each extreme.
+      for (let i = -100; i <= 100; i++) {
+        const f = Math.exp(0.02 * (i / 100));
+        maxP = Math.max(maxP, pnlFn(maxS * f, firstExp));
+        minP = Math.min(minP, pnlFn(minS * f, firstExp));
       }
       const tail = pnlFn(spot * 40, firstExp) - pnlFn(spot * 20, firstExp);
       const unlimitedProfit = tail > 1e-6 * spot;
