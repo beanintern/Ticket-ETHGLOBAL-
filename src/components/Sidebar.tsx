@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import type { Focus, Preset } from '../App';
 import { compactUsd, price as fmtPrice, signed, signedUsd, usd } from '../lib/format';
-import { MARKETS, expiryLabel, listExpiries, strikeStepFor, type Asset, type Candle, type MarketSpec } from '../lib/market';
+import type { Market } from '../data/types';
+import { expiryLabel, type Asset, type MarketSpec } from '../lib/market';
 import {
   buildModel,
   daysLeft,
@@ -19,7 +20,7 @@ interface Props {
   spec: MarketSpec;
   spot: number;
   now: number;
-  feeds: Record<Asset, { candles: Candle[]; spot: number }>;
+  markets: Record<Asset, Market>;
   builderLegs: Leg[];
   builderModel: Model;
   selectedLegId: string | null;
@@ -64,10 +65,12 @@ export function Sidebar(props: Props) {
   );
 }
 
-function Builder({ spec, spot, now, builderLegs: legs, builderModel: model, selectedLegId, onSelectLeg, onUpdateLeg, onRemoveLeg, onClear, onPreset, onPlace }: Props) {
+function Builder({ spec, now, markets, builderLegs: legs, builderModel: model, selectedLegId, onSelectLeg, onUpdateLeg, onRemoveLeg, onClear, onPreset, onPlace }: Props) {
+  const market = markets[spec.asset];
+  const spot = market.spot;
   const [reviewing, setReviewing] = useState(false);
-  const summary = useMemo(() => summarize(model, spec, spot, now), [model, spec, spot, now]);
-  const expiries = useMemo(() => listExpiries(now), [Math.floor(now / 3600e3)]); // eslint-disable-line react-hooks/exhaustive-deps
+  const summary = useMemo(() => summarize(model, market, now), [model, market, now]);
+  const expiries = market.expiries;
   const debit = model.cost;
   const ccy = (v: number) => (Math.abs(v) >= 1000 ? usd(v, 0) : usd(v));
 
@@ -157,7 +160,6 @@ function Builder({ spec, spot, now, builderLegs: legs, builderModel: model, sele
 
           <ol className="legs">
             {legs.map((l, i) => {
-              const step = strikeStepFor(spec, l.expiry, now);
               return (
                 <li key={l.id} className={`leg ${l.id === selectedLegId ? 'is-selected' : ''}`} onClick={() => onSelectLeg(l.id)}>
                   <div className="leg-row">
@@ -182,11 +184,11 @@ function Builder({ spec, spot, now, builderLegs: legs, builderModel: model, sele
                       {l.type === 'C' ? 'Call' : 'Put'}
                     </button>
                     <div className="stepper" aria-label="Strike">
-                      <button onClick={(e) => (e.stopPropagation(), onUpdateLeg(l.id, { strike: Math.max(step, l.strike - step) }))} aria-label="Lower strike">
+                      <button onClick={(e) => (e.stopPropagation(), onUpdateLeg(l.id, { strike: market.stepStrike(l.strike, l.expiry, -1) }))} aria-label="Lower strike">
                         −
                       </button>
                       <span className="num">{fmtPrice(l.strike, 0)}</span>
-                      <button onClick={(e) => (e.stopPropagation(), onUpdateLeg(l.id, { strike: l.strike + step }))} aria-label="Raise strike">
+                      <button onClick={(e) => (e.stopPropagation(), onUpdateLeg(l.id, { strike: market.stepStrike(l.strike, l.expiry, 1) }))} aria-label="Raise strike">
                         +
                       </button>
                     </div>
@@ -206,7 +208,11 @@ function Builder({ spec, spot, now, builderLegs: legs, builderModel: model, sele
                       id={`exp-${l.id}`}
                       value={l.expiry}
                       onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => onUpdateLeg(l.id, { expiry: Number(e.target.value) })}
+                      onChange={(e) => {
+                        // A strike listed on one expiry may not be listed on another.
+                        const expiry = Number(e.target.value);
+                        onUpdateLeg(l.id, { expiry, strike: market.snapStrike(l.strike, expiry) });
+                      }}
                       aria-label="Expiry"
                     >
                       {expiries.map((e) => (
@@ -306,26 +312,26 @@ function Sparkline({ values }: { values: number[] }) {
   );
 }
 
-function PositionCard({ pos, now, feeds, focused, onFocus, onClose }: { pos: Position; now: number; feeds: Props['feeds']; focused: boolean; onFocus: () => void; onClose: () => void }) {
+function PositionCard({ pos, now, markets, focused, onFocus, onClose }: { pos: Position; now: number; markets: Props['markets']; focused: boolean; onFocus: () => void; onClose: () => void }) {
   const [confirming, setConfirming] = useState(false);
-  const spec = MARKETS[pos.asset];
-  const feed = feeds[pos.asset];
-  const model = buildModel(pos.legs, spec, feed.spot, now);
+  const market = markets[pos.asset];
+  const spec = market.spec;
+  const model = buildModel(pos.legs, market, now);
   const pnl = model.value - model.cost;
   const pct = model.cost !== 0 ? (pnl / Math.abs(model.cost)) * 100 : 0;
-  const summary = summarize(model, spec, feed.spot, now);
+  const summary = summarize(model, market, now);
   const firstExpiry = Math.min(...pos.legs.map((l) => l.expiry));
 
   const series = useMemo(() => {
     const pts: number[] = [];
-    const cs = feed.candles.filter((c) => c.t >= pos.openedAt - 3600e3);
+    const cs = market.candles.filter((c) => c.t >= pos.openedAt - 3600e3);
     const stride = Math.max(1, Math.floor(cs.length / 60));
     pts.push(0);
     for (let i = 0; i < cs.length; i += stride) pts.push(model.pnl(cs[i].c, Math.max(cs[i].t + 3600e3, pos.openedAt)));
     pts.push(pnl);
     return pts;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pos, Math.floor(now / 5000), feed.candles.length]);
+  }, [pos, Math.floor(now / 5000), market.candles.length]);
 
   const captured = summary && !summary.unlimitedProfit && summary.maxProfit > 0 ? Math.max(0, Math.min(1, pnl / summary.maxProfit)) : null;
 
@@ -388,15 +394,15 @@ function PositionCard({ pos, now, feeds, focused, onFocus, onClose }: { pos: Pos
   );
 }
 
-function Positions({ positions, closed, now, feeds, focus, onFocus, onClosePosition }: Props) {
+function Positions({ positions, closed, now, markets, focus, onFocus, onClosePosition }: Props) {
   let open = 0;
   let deltaUsd = 0;
   for (const p of positions) {
-    const spec = MARKETS[p.asset];
-    const s = feeds[p.asset].spot;
-    const m = buildModel(p.legs, spec, s, now);
+    const market = markets[p.asset];
+    const s = market.spot;
+    const m = buildModel(p.legs, market, now);
     open += m.value - m.cost;
-    const sum = summarize(m, spec, s, now);
+    const sum = summarize(m, market, now);
     if (sum) deltaUsd += sum.greeks.delta * s;
   }
   const realized = closed.reduce((a, c) => a + c.realized, 0);
@@ -428,7 +434,7 @@ function Positions({ positions, closed, now, feeds, focus, onFocus, onClosePosit
               key={p.id}
               pos={p}
               now={now}
-              feeds={feeds}
+              markets={markets}
               focused={focus.kind === 'position' && focus.id === p.id}
               onFocus={() => onFocus(p.id)}
               onClose={() => onClosePosition(p.id)}

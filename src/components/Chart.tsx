@@ -6,12 +6,11 @@ import {
   DAY,
   HOUR,
   YEAR,
-  impliedVol,
-  snapStrike,
   type Candle,
   type Expiry,
   type MarketSpec,
 } from '../lib/market';
+import type { Market } from '../data/types';
 import { buildModel, type Leg, type Model, type Side } from '../lib/strategy';
 
 export type Tool = 'pointer' | 'buyC' | 'sellC' | 'buyP' | 'sellP';
@@ -34,6 +33,7 @@ export interface ChartView {
 
 interface Props {
   spec: MarketSpec;
+  market: Market;
   candles: Candle[];
   spot: number;
   now: number;
@@ -237,7 +237,7 @@ export function Chart(props: Props) {
 
   /** Nearest listed expiry (by pixels) and strike for a point in the future region. */
   const snapAt = useCallback((g: Geom, x: number, y: number) => {
-    const { expiries, now, spec } = propsRef.current;
+    const { expiries, market } = propsRef.current;
     if (x < g.nowX + 2 || x > g.plotR || y < g.plotT || y > g.plotB) return null;
     let best: Expiry | null = null;
     let bestD = Infinity;
@@ -251,7 +251,7 @@ export function Chart(props: Props) {
       }
     }
     if (!best) return null;
-    return { expiry: best.ts, strike: snapStrike(spec, g.yToP(y), best.ts, now) };
+    return { expiry: best.ts, strike: market.snapStrike(g.yToP(y), best.ts) };
   }, []);
 
   const draw = useCallback(() => {
@@ -262,7 +262,7 @@ export function Chart(props: Props) {
     ctx.save();
     try {
     const p = propsRef.current;
-    const { spec, candles, spot, now, expiries, model, editableLegs, staticLegs, tool, selectedLegId, view } = p;
+    const { spec, market, candles, spot, now, expiries, model, editableLegs, staticLegs, tool, selectedLegId, view } = p;
     const g = computeGeom();
     geomRef.current = g;
     // What this frame drew, for the automated chart check (scripts/check-chart.mjs).
@@ -309,7 +309,7 @@ export function Chart(props: Props) {
       : legs;
     // Re-price the dragged leg at its new strike/expiry, so the map shows the trade as it
     // would be if you dropped it here (new premium, not the old one).
-    const liveModel = override ? buildModel(legsForPnl, spec, spot, now) : model;
+    const liveModel = override ? buildModel(legsForPnl, market, now) : model;
     const pnlFn = liveModel.pnl;
 
     // ---- P&L heat map over (time, price) ----
@@ -957,7 +957,7 @@ export function Chart(props: Props) {
       const ghost: Leg = { id: '__ghost', asset: spec.asset, type: tl.type, side: tl.side, strike: snap.strike, expiry: snap.expiry, qty: 1 };
       drawLeg(ghost, true);
       const T = (snap.expiry - now) / YEAR;
-      const iv = impliedVol(spec, spot, snap.strike, T);
+      const iv = market.iv(tl.type, snap.strike, snap.expiry, now);
       const prem = bsPrice(tl.type, spot, snap.strike, T, iv);
       ghostInfo = [
         `${tl.label} ${fmtPrice(snap.strike, 0)} · ${fmtTime(snap.expiry, false)}`,

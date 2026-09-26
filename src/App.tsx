@@ -1,23 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Chart, TOOL_LEG, type ChartView, type Tool } from './components/Chart';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
 import { bsPrice } from './lib/bs';
 import { price as fmtPrice, signed } from './lib/format';
-import {
-  DAY,
-  HOUR,
-  MARKETS,
-  YEAR,
-  gaussian,
-  generateHistory,
-  impliedVol,
-  listExpiries,
-  priceAt,
-  snapStrike,
-  type Asset,
-  type Candle,
-} from './lib/market';
+import { createMockSource } from './data/mock';
+import type { Market, MarketSource } from './data/types';
+import { DAY, HOUR, MARKETS, YEAR, priceAt, type Asset } from './lib/market';
 import {
   buildModel,
   describe,
@@ -28,43 +17,35 @@ import {
   type Side,
 } from './lib/strategy';
 
-const STORE_KEY = 'ticket.positions.v1';
-
-interface Feed {
-  candles: Candle[];
-  spot: number;
-}
-
-function initFeeds(now: number): Record<Asset, Feed> {
-  const out = {} as Record<Asset, Feed>;
-  for (const a of Object.keys(MARKETS) as Asset[]) {
-    const candles = generateHistory(MARKETS[a], now);
-    out[a] = { candles, spot: candles[candles.length - 1].c };
-  }
-  return out;
-}
+// Paper positions are kept per data source, so demo trades never mix with live-priced ones.
+const storeKey = (kind: MarketSource['kind']) => (kind === 'mock' ? 'ticket.positions.v1' : `ticket.positions.${kind}.v1`);
 
 export type Preset = 'callSpread' | 'putSpread' | 'straddle' | 'strangle' | 'condor' | 'chaos';
 
-function presetLegs(preset: Preset, asset: Asset, spot: number, now: number): Leg[] {
-  const spec = MARKETS[asset];
-  const exps = listExpiries(now);
+function presetLegs(preset: Preset, market: Market, now: number): Leg[] {
+  const { asset, spot } = market;
+  const exps = market.expiries;
+  if (!exps.length) return [];
   const expiry = (exps.find((e) => e.kind !== 'daily' && e.ts - now > 4 * DAY) ?? exps[0]).ts;
-  const step = spec.strikeStep;
-  const atm = snapStrike(spec, spot, expiry, now);
-  const w = step * (asset === 'ETH' ? 4 : 3);
+  // Strikes are "n listed strikes away" so presets work on any strike grid (mock or exchange).
+  const off = (k: number, n: number, exp = expiry) => {
+    for (let i = 0; i < Math.abs(n); i++) k = market.stepStrike(k, exp, n > 0 ? 1 : -1);
+    return k;
+  };
+  const atm = market.snapStrike(spot, expiry);
+  const w = asset === 'ETH' ? 4 : 3;
   const mk = (type: OptType, side: Side, strike: number): Leg => ({ id: newId(), asset, type, side, strike, expiry, qty: 1 });
   switch (preset) {
     case 'callSpread':
-      return [mk('C', 1, atm + step), mk('C', -1, atm + step + w)];
+      return [mk('C', 1, off(atm, 1)), mk('C', -1, off(atm, 1 + w))];
     case 'putSpread':
-      return [mk('P', 1, atm - step), mk('P', -1, atm - step - w)];
+      return [mk('P', 1, off(atm, -1)), mk('P', -1, off(atm, -1 - w))];
     case 'straddle':
       return [mk('C', 1, atm), mk('P', 1, atm)];
     case 'strangle':
-      return [mk('P', 1, atm - w), mk('C', 1, atm + w)];
+      return [mk('P', 1, off(atm, -w)), mk('C', 1, off(atm, w))];
     case 'condor':
-      return [mk('P', 1, atm - 2 * w), mk('P', -1, atm - w), mk('C', -1, atm + w), mk('C', 1, atm + 2 * w)];
+      return [mk('P', 1, off(atm, -2 * w)), mk('P', -1, off(atm, -w)), mk('C', -1, off(atm, w)), mk('C', 1, off(atm, 2 * w))];
     case 'chaos': {
       // A demo of what stacking legs can do. Any piecewise-linear payoff can be built from calls:
       // each call bends the payoff line at its strike by its quantity. Two zig-zags ("sawtooth")
@@ -75,31 +56,32 @@ function presetLegs(preset: Preset, asset: Asset, spot: number, now: number): Le
       const legs: Leg[] = [];
       const zigzag = (exp: number, width: number, kinks: number, amp: number, phase: number) => {
         let prev = 0;
+        const mid = market.snapStrike(spot, exp);
         for (let i = 0; i <= kinks; i++) {
-          const strike = atm + (i - kinks / 2) * width;
+          const strike = off(mid, (i - kinks / 2) * width, exp);
           const slope = i === kinks ? 0 : (i + phase) % 2 === 0 ? amp : -amp;
           const d = slope - prev;
           if (d !== 0) legs.push({ id: newId(), asset, type: 'C', side: d > 0 ? 1 : -1, strike, expiry: exp, qty: Math.abs(d) });
           prev = slope;
         }
       };
-      zigzag(e1, step * 2, 12, 1, 0);
-      zigzag(e2, step * 4, 8, 2, 1);
+      zigzag(e1, 2, 12, 1, 0);
+      zigzag(e2, 4, 8, 2, 1);
       return legs;
     }
   }
 }
 
 /** Example positions so the tracking view isn't empty on first load. */
-function demoPositions(feeds: Record<Asset, Feed>, now: number): Position[] {
+function demoPositions(markets: Record<Asset, Market>, now: number): Position[] {
   const make = (asset: Asset, openedAgo: number, build: (spot: number, exps: number[]) => Omit<Leg, 'id' | 'asset' | 'entry'>[]) => {
-    const spec = MARKETS[asset];
+    const market = markets[asset];
     const openedAt = now - openedAgo;
-    const openSpot = priceAt(feeds[asset].candles, openedAt);
-    const exps = listExpiries(now).filter((e) => e.kind !== 'daily').map((e) => e.ts);
+    const openSpot = priceAt(market.candles, openedAt);
+    const exps = market.expiries.filter((e) => e.kind !== 'daily').map((e) => e.ts);
     const legs: Leg[] = build(openSpot, exps).map((l) => {
       const T = (l.expiry - openedAt) / YEAR;
-      const iv = impliedVol(spec, openSpot, l.strike, T);
+      const iv = market.iv(l.type, l.strike, l.expiry, openedAt);
       return { ...l, id: newId(), asset, entry: bsPrice(l.type, openSpot, l.strike, T, iv) };
     });
     return { id: newId('pos'), asset, name: describe(legs), legs, openedAt, openSpot };
@@ -124,9 +106,9 @@ function demoPositions(feeds: Record<Asset, Feed>, now: number): Position[] {
   ];
 }
 
-function loadStore(): { positions: Position[]; closed: ClosedPosition[] } | null {
+function loadStore(kind: MarketSource['kind']): { positions: Position[]; closed: ClosedPosition[] } | null {
   try {
-    const raw = localStorage.getItem(STORE_KEY);
+    const raw = localStorage.getItem(storeKey(kind));
     if (!raw) return null;
     const v = JSON.parse(raw);
     if (!Array.isArray(v.positions)) return null;
@@ -139,55 +121,38 @@ function loadStore(): { positions: Position[]; closed: ClosedPosition[] } | null
 export type Focus = { kind: 'builder' } | { kind: 'position'; id: string };
 
 export default function App() {
-  const feedsRef = useRef<Record<Asset, Feed> | null>(null);
-  if (!feedsRef.current) feedsRef.current = initFeeds(Date.now());
-  const feeds = feedsRef.current;
+  const [source] = useState<MarketSource>(() => createMockSource());
+  const markets = source.markets;
 
   const [now, setNow] = useState(() => Date.now());
   const [asset, setAsset] = useState<Asset>('ETH');
   const [tool, setTool] = useState<Tool>('buyC');
   const [view, setView] = useState<ChartView>({ horizon: 21 * DAY, yZoom: 1, yShift: 0 });
   const [builder, setBuilder] = useState<Record<Asset, Leg[]>>(() => ({
-    ETH: presetLegs('callSpread', 'ETH', feeds.ETH.spot, Date.now()),
-    BTC: presetLegs('putSpread', 'BTC', feeds.BTC.spot, Date.now()),
+    ETH: presetLegs('callSpread', markets.ETH, Date.now()),
+    BTC: presetLegs('putSpread', markets.BTC, Date.now()),
   }));
-  const [positions, setPositions] = useState<Position[]>(() => loadStore()?.positions ?? demoPositions(feeds, Date.now()));
-  const [closed, setClosed] = useState<ClosedPosition[]>(() => loadStore()?.closed ?? []);
+  const [positions, setPositions] = useState<Position[]>(
+    () => loadStore(source.kind)?.positions ?? (source.kind === 'mock' ? demoPositions(markets, Date.now()) : []),
+  );
+  const [closed, setClosed] = useState<ClosedPosition[]>(() => loadStore(source.kind)?.closed ?? []);
   const [focus, setFocus] = useState<Focus>({ kind: 'builder' });
   const [tab, setTab] = useState<'build' | 'positions'>('build');
   const [includePortfolio, setIncludePortfolio] = useState(false);
   const [selectedLegId, setSelectedLegId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Simulated index feed: one GBM tick per second per asset.
-  useEffect(() => {
-    const id = setInterval(() => {
-      const t = Date.now();
-      for (const a of Object.keys(MARKETS) as Asset[]) {
-        const f = feeds[a];
-        const spec = MARKETS[a];
-        f.spot *= Math.exp(spec.baseIv * 1.4 * Math.sqrt(1000 / YEAR) * gaussian());
-        const last = f.candles[f.candles.length - 1];
-        const hour = Math.floor(t / HOUR) * HOUR;
-        if (hour > last.t) f.candles.push({ t: hour, o: last.c, h: Math.max(last.c, f.spot), l: Math.min(last.c, f.spot), c: f.spot });
-        else {
-          last.c = f.spot;
-          last.h = Math.max(last.h, f.spot);
-          last.l = Math.min(last.l, f.spot);
-        }
-      }
-      setNow(t);
-    }, 1000);
-    return () => clearInterval(id);
-  }, [feeds]);
+  // Re-render whenever the market data changes.
+  useEffect(() => source.subscribe(() => setNow(Date.now())), [source]);
+  useEffect(() => () => source.close(), [source]);
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORE_KEY, JSON.stringify({ positions, closed }));
+      localStorage.setItem(storeKey(source.kind), JSON.stringify({ positions, closed }));
     } catch {
       /* storage unavailable: positions just won't persist */
     }
-  }, [positions, closed]);
+  }, [positions, closed, source.kind]);
 
   useEffect(() => {
     if (!toast) return;
@@ -195,10 +160,10 @@ export default function App() {
     return () => clearTimeout(id);
   }, [toast]);
 
-  const spec = MARKETS[asset];
-  const feed = feeds[asset];
-  const spot = feed.spot;
-  const expiries = useMemo(() => listExpiries(now), [Math.floor(now / HOUR)]); // eslint-disable-line react-hooks/exhaustive-deps
+  const market = markets[asset];
+  const spec = market.spec;
+  const spot = market.spot;
+  const expiries = market.expiries;
   const builderLegs = builder[asset];
   const assetPositions = positions.filter((p) => p.asset === asset);
   const focusedPosition = focus.kind === 'position' ? positions.find((p) => p.id === focus.id) : undefined;
@@ -213,8 +178,8 @@ export default function App() {
   const editableLegs = focusedPosition ? [] : builderLegs;
   const staticLegs = focusedPosition ? focusedPosition.legs : includePortfolio ? assetPositions.flatMap((p) => p.legs) : [];
   const chartLegs = [...staticLegs, ...editableLegs];
-  const chartModel = buildModel(chartLegs, spec, spot, now);
-  const builderModel = buildModel(builderLegs, spec, spot, now);
+  const chartModel = buildModel(chartLegs, market, now);
+  const builderModel = buildModel(builderLegs, market, now);
 
   // Undo / redo for ticket edits. Each entry is the whole builder plus the market it was edited on.
   // Placing an order is a real (paper) trade, so it clears the history instead of being undoable.
@@ -329,7 +294,7 @@ export default function App() {
   const closePosition = (id: string) => {
     const pos = positions.find((p) => p.id === id);
     if (!pos) return;
-    const m = buildModel(pos.legs, MARKETS[pos.asset], feeds[pos.asset].spot, now);
+    const m = buildModel(pos.legs, markets[pos.asset], now);
     setPositions((ps) => ps.filter((p) => p.id !== id));
     setClosed((c) => [{ id, asset: pos.asset, name: pos.name, openedAt: pos.openedAt, closedAt: now, realized: m.value - m.cost }, ...c]);
     if (focus.kind === 'position' && focus.id === id) setFocus({ kind: 'builder' });
@@ -348,15 +313,15 @@ export default function App() {
         setBuilder((b) => ({ ...b, [a]: legs.map((l) => ({ ...l, id: newId(), asset: a })) }));
       },
       setView: (v: ChartView) => setView(v),
-      spot: (a: Asset) => feeds[a].spot,
+      spot: (a: Asset) => markets[a].spot,
       specs: MARKETS,
-      expiries: () => listExpiries(Date.now()).map((e) => e.ts),
+      expiries: (a: Asset = 'ETH') => markets[a].expiries.map((e) => e.ts),
     };
-  }, [feeds]);
+  }, [markets]);
 
-  const dayAgo = priceAt(feed.candles, now - DAY);
+  const dayAgo = priceAt(market.candles, now - DAY);
   const change = (spot / dayAgo - 1) * 100;
-  const atmIv = impliedVol(spec, spot, spot, 30 / 365);
+  const atmIv = market.iv('C', spot, now + 30 * DAY, now);
 
   return (
     <div className="app">
@@ -367,7 +332,7 @@ export default function App() {
         </div>
         <nav className="markets" aria-label="Markets">
           {(Object.keys(MARKETS) as Asset[]).map((a) => {
-            const f = feeds[a];
+            const f = markets[a];
             const ch = (f.spot / priceAt(f.candles, now - DAY) - 1) * 100;
             return (
               <button
@@ -477,7 +442,8 @@ export default function App() {
           </div>
           <Chart
             spec={spec}
-            candles={feed.candles}
+            market={market}
+            candles={market.candles}
             spot={spot}
             now={now}
             expiries={expiries}
@@ -526,7 +492,7 @@ export default function App() {
           spec={spec}
           spot={spot}
           now={now}
-          feeds={feeds}
+          markets={markets}
           builderLegs={builderLegs}
           builderModel={builderModel}
           selectedLegId={selectedLegId}
@@ -536,7 +502,7 @@ export default function App() {
           onClear={() => setLegs(() => [])}
           onPreset={(p) => {
             setFocus({ kind: 'builder' });
-            setLegs(() => presetLegs(p, asset, spot, now));
+            setLegs(() => presetLegs(p, market, now));
           }}
           onPlace={placeOrder}
           positions={positions}

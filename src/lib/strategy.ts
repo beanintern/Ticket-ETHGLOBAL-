@@ -1,5 +1,6 @@
 import { bsGreeks, bsPrice, normCdf, type Greeks, type OptType } from './bs';
-import { DAY, YEAR, expiryLabel, impliedVol, type Asset, type MarketSpec } from './market';
+import type { Market } from '../data/types';
+import { DAY, YEAR, expiryLabel, type Asset } from './market';
 
 export type Side = 1 | -1;
 
@@ -48,8 +49,9 @@ export interface Model {
   pnl: (S: number, t: number) => number;
 }
 
-export function buildModel(legs: Leg[], spec: MarketSpec, spot: number, now: number): Model {
-  const ivs = legs.map((l) => impliedVol(spec, spot, l.strike, Math.max((l.expiry - now) / YEAR, 1e-6)));
+export function buildModel(legs: Leg[], market: Market, now: number): Model {
+  const spot = market.spot;
+  const ivs = legs.map((l) => market.iv(l.type, l.strike, l.expiry, now));
   const marks = legs.map((l, i) => bsPrice(l.type, spot, l.strike, (l.expiry - now) / YEAR, ivs[i]));
   const entries = legs.map((l, i) => l.entry ?? marks[i]);
   let cost = 0;
@@ -83,7 +85,8 @@ export interface Summary {
 }
 
 /** Payoff stats at the first expiry in the structure (later legs valued with Black-Scholes). */
-export function summarize(model: Model, spec: MarketSpec, spot: number, now: number): Summary | null {
+export function summarize(model: Model, market: Market, now: number): Summary | null {
+  const spot = market.spot;
   const { legs } = model;
   if (!legs.length) return null;
   const horizon = Math.min(...legs.map((l) => l.expiry));
@@ -129,7 +132,7 @@ export function summarize(model: Model, spec: MarketSpec, spot: number, now: num
 
   // Probability of profit under a lognormal at ATM vol.
   const T = Math.max((horizon - now) / YEAR, 1e-6);
-  const iv = impliedVol(spec, spot, spot, T);
+  const iv = market.iv('C', spot, horizon, now);
   const sq = iv * Math.sqrt(T);
   const cdf = (x: number) => normCdf((Math.log(x / spot) + 0.5 * sq * sq) / sq);
   let pop = 0;
