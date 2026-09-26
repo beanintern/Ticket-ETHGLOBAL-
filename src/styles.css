@@ -65,6 +65,12 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .stats .label { font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
 .conn { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--short); box-shadow: 0 0 0 3px rgba(240,169,75,0.15); }
+.conn.is-live .conn-dot { background: var(--profit); box-shadow: 0 0 0 3px rgba(46,201,139,0.18); }
+.conn.is-live { color: var(--text); }
+.loading { height: 100%; min-height: 60vh; display: grid; place-content: center; justify-items: center; gap: 12px; color: var(--muted); padding-inline: 16px; text-align: center; }
+.loading p { margin: 0; }
+.loading-error { color: var(--loss); max-width: 46ch; }
+.loading a { color: var(--long); }
 
 /* ---- Workspace ---- */
 .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 360px; min-height: 0; }

@@ -9,7 +9,8 @@
     "build:artifact": "vite build --mode artifact && node scripts/to-artifact.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "check:chart": "vite build && node scripts/check-chart.mjs"
+    "check:chart": "vite build && node scripts/check-chart.mjs",
+    "check:live": "node scripts/check-live.mjs"
   },
   "dependencies": {
     "react": "^19.3.0",

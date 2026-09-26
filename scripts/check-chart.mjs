@@ -231,7 +231,7 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 860 }, dev
 const pageErrors = [];
 page.on('pageerror', (e) => pageErrors.push(e.message));
 await page.addInitScript(() => { window.__TICKET_TEST__ = true; });
-await page.goto(url);
+await page.goto(`${url}?source=mock`); // the check runs against the simulator
 await page.waitForFunction(() => window.__ticket && window.__chart);
 await page.mouse.move(1300, 845); // keep the cursor (and its tooltip) off the chart
 

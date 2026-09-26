@@ -4,7 +4,7 @@ import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
 import { bsPrice } from './lib/bs';
 import { price as fmtPrice, signed } from './lib/format';
-import { createMockSource } from './data/mock';
+import { createSource, pickSourceKind } from './data';
 import type { Market, MarketSource } from './data/types';
 import { DAY, HOUR, MARKETS, YEAR, priceAt, type Asset } from './lib/market';
 import {
@@ -121,7 +121,7 @@ function loadStore(kind: MarketSource['kind']): { positions: Position[]; closed:
 export type Focus = { kind: 'builder' } | { kind: 'position'; id: string };
 
 export default function App() {
-  const [source] = useState<MarketSource>(() => createMockSource());
+  const [source] = useState<MarketSource>(() => createSource(pickSourceKind()));
   const markets = source.markets;
 
   const [now, setNow] = useState(() => Date.now());
@@ -144,6 +144,17 @@ export default function App() {
 
   // Re-render whenever the market data changes.
   useEffect(() => source.subscribe(() => setNow(Date.now())), [source]);
+
+  // Live data arrives after mount: give each market its starter spread once expiries are known.
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (seeded.current || source.status !== 'ready') return;
+    seeded.current = true;
+    setBuilder((b) => ({
+      ETH: b.ETH.length ? b.ETH : presetLegs('callSpread', markets.ETH, Date.now()),
+      BTC: b.BTC.length ? b.BTC : presetLegs('putSpread', markets.BTC, Date.now()),
+    }));
+  }, [source.status, markets, now]);
   useEffect(() => () => source.close(), [source]);
 
   useEffect(() => {
@@ -319,6 +330,26 @@ export default function App() {
     };
   }, [markets]);
 
+  // Until live data has arrived there is nothing to chart yet.
+  if (!market.candles.length || !spot) {
+    return (
+      <div className="loading">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true" />
+          Ticket
+        </div>
+        {source.status === 'error' ? (
+          <>
+            <p className="loading-error">{source.error}</p>
+            <a href="?source=mock">Use demo data instead</a>
+          </>
+        ) : (
+          <p>Connecting to Derive…</p>
+        )}
+      </div>
+    );
+  }
+
   const dayAgo = priceAt(market.candles, now - DAY);
   const change = (spot / dayAgo - 1) * 100;
   const atmIv = market.iv('C', spot, now + 30 * DAY, now);
@@ -366,9 +397,16 @@ export default function App() {
             <span className="num">{(atmIv * 100).toFixed(1)}%</span>
           </div>
         </div>
-        <div className="conn" title="The mockup uses simulated prices. Nothing is sent to Derive.">
-          <span className="conn-dot" /> <span className="wide-only">Derive · </span>mock data
-        </div>
+        {source.kind === 'live' ? (
+          <div className={`conn ${source.error ? 'is-warn' : 'is-live'}`} title={source.error ?? 'Live market data from Derive. Orders are still paper trades.'}>
+            <span className="conn-dot" /> <span className="wide-only">Derive · </span>
+            {source.error ? 'reconnecting' : 'live'}
+          </div>
+        ) : (
+          <div className="conn" title="Simulated prices. Nothing is sent to Derive.">
+            <span className="conn-dot" /> <span className="wide-only">Derive · </span>mock data
+          </div>
+        )}
       </header>
 
       <main className="workspace">
