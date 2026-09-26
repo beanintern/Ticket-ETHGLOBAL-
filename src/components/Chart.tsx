@@ -95,6 +95,8 @@ interface Geom {
 
 interface Marker {
   id: string;
+  label: string;
+  color: string;
   x: number;
   y: number;
   w: number;
@@ -576,48 +578,22 @@ export function Chart(props: Props) {
       ctx.lineTo(x, y);
       ctx.stroke();
       ctx.setLineDash([]);
-      const label = `${l.side > 0 ? '+' : '−'}${l.qty} ${fmtPrice(l.strike, 0)} ${l.type}`;
-      const tw = ctx.measureText(label).width;
-      const pw = tw + 26;
-      const ph = 20;
-      const px = x - 10 - pw;
-      const py = y - ph / 2;
-      roundRect(ctx, px, py, pw, ph, 5);
-      ctx.fillStyle = ghost ? 'rgba(12,15,20,0.85)' : '#0c0f14';
+      const r = l.id === selectedLegId ? 6.5 : 5.5;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = col;
       ctx.fill();
-      ctx.lineWidth = l.id === selectedLegId ? 2 : 1;
-      ctx.strokeStyle = l.id === selectedLegId ? C.text : col;
-      if (ghost) ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = l.id === selectedLegId ? C.text : '#0c0f14';
+      if (ghost) ctx.setLineDash([2, 2]);
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.lineWidth = 1;
-      // Direction glyph: calls pay above the strike, puts below.
-      ctx.fillStyle = col;
-      ctx.beginPath();
-      const gx = px + 9;
-      if (l.type === 'C') {
-        ctx.moveTo(gx - 4, y + 3);
-        ctx.lineTo(gx + 4, y + 3);
-        ctx.lineTo(gx, y - 4);
-      } else {
-        ctx.moveTo(gx - 4, y - 3);
-        ctx.lineTo(gx + 4, y - 3);
-        ctx.lineTo(gx, y + 4);
-      }
-      ctx.fill();
-      ctx.fillStyle = C.text;
-      ctx.textAlign = 'left';
-      ctx.fillText(label, px + 18, y + 0.5);
-      ctx.beginPath();
-      ctx.arc(x, y, 5, 0, Math.PI * 2);
-      ctx.fillStyle = col;
-      ctx.fill();
-      ctx.strokeStyle = '#0c0f14';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.lineWidth = 1;
       ctx.globalAlpha = 1;
-      if (!isStatic && !ghost) markers.push({ id: l.id, x: px, y: py, w: pw + 16, h: ph });
+      if (!isStatic && !ghost) {
+        const label = `${l.side > 0 ? 'Long' : 'Short'} ${l.qty} × ${fmtPrice(l.strike, 0)} ${l.type === 'C' ? 'Call' : 'Put'} · ${fmtTime(l.expiry, false)}`;
+        markers.push({ id: l.id, x: x - 10, y: y - 10, w: 20, h: 20, label, color: col });
+      }
     };
     for (const l of staticLegs) if (!editableIds.has(l.id)) drawLeg(l);
     for (const l of editableLegs) {
@@ -627,7 +603,7 @@ export function Chart(props: Props) {
     markersRef.current = markers;
 
     // ---- Ghost for the active tool ----
-    const overMarker = hover && markers.some((m) => hover.x >= m.x && hover.x <= m.x + m.w && hover.y >= m.y && hover.y <= m.y + m.h);
+    const overMarker = hover && markers.find((m) => hover.x >= m.x && hover.x <= m.x + m.w && hover.y >= m.y && hover.y <= m.y + m.h);
     let ghostInfo: string[] | null = null;
     if (snap && tool !== 'pointer' && !overMarker) {
       const tl = TOOL_LEG[tool];
@@ -735,6 +711,7 @@ export function Chart(props: Props) {
 
       const lines: { text: string; color?: string; bold?: boolean }[] = [];
       const ht = xToT(hover.x);
+      if (overMarker) lines.push({ text: overMarker.label, bold: true, color: overMarker.color });
       if (hover.x > nowX) {
         if (ghostInfo) {
           lines.push({ text: ghostInfo[0], bold: true, color: TOOL_LEG[tool as Exclude<Tool, 'pointer'>].side > 0 ? C.long : C.short });
