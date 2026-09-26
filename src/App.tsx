@@ -473,7 +473,11 @@ export default function App() {
             onAdd={onAdd}
             onMove={onMove}
             onSelect={setSelectedLegId}
-            onRemove={onRemove}
+            onRemove={(id) => {
+              const leg = builderLegs.find((l) => l.id === id);
+              onRemove(id);
+              if (leg) setToast(`Removed ${leg.side > 0 ? 'long' : 'short'} ${fmtPrice(leg.strike, 0)} ${leg.type === 'C' ? 'call' : 'put'}. Undo with ↶`);
+            }}
           />
           <div className="chart-legend">
             <span>
@@ -488,6 +492,7 @@ export default function App() {
             <span>
               <i className="sw sw-open" /> Uncapped loss
             </span>
+            <span className="hint-touch">Tap to place · hold to inspect · hold a dot to remove · pinch to zoom</span>
             <span className="hint">
               Click an expiry column to add a leg · drag legs to move · right-click to remove · scroll to zoom time, shift-scroll or drag the price axis for price
             </span>

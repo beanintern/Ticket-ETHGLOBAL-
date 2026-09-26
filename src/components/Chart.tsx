@@ -74,6 +74,8 @@ const PROFILE_W = 92;
 /** Below this width (phones) the axis, P&L strip and history get narrower so the plot keeps its room. */
 const NARROW_W = 600;
 const TOUCH_SLACK = 10;
+/** How long a finger must rest before a press counts as a long-press. */
+const LONG_PRESS_MS = 450;
 const TIME_H = 26;
 const TOP_H = 28;
 const PAST_FRAC = 0.3;
@@ -1065,26 +1067,93 @@ export function Chart(props: Props) {
 
   // Touch: the chart lets vertical swipes scroll the page (touch-action: pan-y), except when the
   // finger lands on a leg or the price axis, where we block scrolling so the drag works.
+  //
+  // Gestures on top of that:
+  // - long-press on empty chart: "inspect" — pins the crosshair and tooltip (premium, P&L) at that
+  //   point; keep the finger down to scrub. The next tap dismisses it.
+  // - long-press on a leg dot: removes the leg (undo brings it back).
+  // - two-finger pinch: horizontal spread zooms time, vertical spread zooms price.
   const tapRef = useRef<{ x: number; y: number } | null>(null);
+  const inspectRef = useRef(false);
+  const longPressRef = useRef<number | null>(null);
+  const pinchRef = useRef<{ dx: number; dy: number; horizon: number; yZoom: number } | null>(null);
+  const cancelLongPress = () => {
+    if (longPressRef.current !== null) window.clearTimeout(longPressRef.current);
+    longPressRef.current = null;
+  };
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const spread = (e: TouchEvent) => ({
+      dx: Math.abs(e.touches[0].clientX - e.touches[1].clientX),
+      dy: Math.abs(e.touches[0].clientY - e.touches[1].clientY),
+    });
     const onTouchStart = (e: TouchEvent) => {
       const g = geomRef.current;
+      if (!g) return;
+      if (e.touches.length === 2) {
+        // Second finger down: this is a pinch, not a tap, drag or inspect.
+        e.preventDefault();
+        cancelLongPress();
+        tapRef.current = null;
+        dragRef.current = null;
+        inspectRef.current = false;
+        hoverRef.current = null;
+        const { view } = propsRef.current;
+        pinchRef.current = { ...spread(e), horizon: view.horizon, yZoom: view.yZoom };
+        return;
+      }
       const t = e.touches[0];
-      if (!g || !t || e.touches.length > 1) return;
+      if (!t || e.touches.length > 2) return;
       const r = canvas.getBoundingClientRect();
       const x = t.clientX - r.left;
       const y = t.clientY - r.top;
       if (x > g.plotR + g.profileW || hitMarker(x, y, TOUCH_SLACK)) e.preventDefault();
     };
+    const onTouchMove = (e: TouchEvent) => {
+      const pinch = pinchRef.current;
+      if (pinch && e.touches.length === 2) {
+        e.preventDefault();
+        const { dx, dy } = spread(e);
+        const { view, onViewChange } = propsRef.current;
+        const next = { ...view };
+        // Only an axis the fingers are actually spread along gets zoomed.
+        if (pinch.dx > 40) next.horizon = Math.min(150 * DAY, Math.max(1.5 * DAY, pinch.horizon * (pinch.dx / Math.max(dx, 20))));
+        if (pinch.dy > 40) next.yZoom = Math.min(4, Math.max(0.15, pinch.yZoom * (pinch.dy / Math.max(dy, 20))));
+        lastMoveRef.current = performance.now();
+        onViewChange(next);
+        return;
+      }
+      // While inspecting, the finger scrubs the crosshair instead of scrolling the page.
+      if (inspectRef.current) e.preventDefault();
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) pinchRef.current = null;
+    };
     canvas.addEventListener('touchstart', onTouchStart, { passive: false });
-    return () => canvas.removeEventListener('touchstart', onTouchStart);
+    canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+    canvas.addEventListener('touchend', onTouchEnd);
+    canvas.addEventListener('touchcancel', onTouchEnd);
+    return () => {
+      canvas.removeEventListener('touchstart', onTouchStart);
+      canvas.removeEventListener('touchmove', onTouchMove);
+      canvas.removeEventListener('touchend', onTouchEnd);
+      canvas.removeEventListener('touchcancel', onTouchEnd);
+      cancelLongPress();
+    };
   }, []);
 
   const onPointerDown = (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || !e.isPrimary || pinchRef.current) return;
     const { x, y } = pos(e);
+    const touch = e.pointerType === 'touch';
+    if (touch && inspectRef.current) {
+      // A tap while inspecting just dismisses the inspector.
+      inspectRef.current = false;
+      hoverRef.current = null;
+      draw();
+      return;
+    }
     hoverRef.current = { x, y };
     const g = geomRef.current ?? computeGeom();
     const p = propsRef.current;
@@ -1098,12 +1167,33 @@ export function Chart(props: Props) {
       const leg = p.editableLegs.find((l) => l.id === m.id)!;
       dragRef.current = { kind: 'leg', id: m.id, startX: x, startY: y, moved: false, strike: leg.strike, expiry: leg.expiry, grabDX: m.x + m.w / 2 - x, grabDY: m.y + m.h / 2 - y };
       (e.target as Element).setPointerCapture(e.pointerId);
+      if (touch) {
+        cancelLongPress();
+        longPressRef.current = window.setTimeout(() => {
+          longPressRef.current = null;
+          const d = dragRef.current;
+          if (d?.kind !== 'leg' || d.moved) return;
+          dragRef.current = null;
+          hoverRef.current = null;
+          navigator.vibrate?.(15);
+          propsRef.current.onRemove(d.id!);
+        }, LONG_PRESS_MS);
+      }
       draw();
       return;
     }
     // A finger might be starting a scroll, so touches act on lift-off (see onPointerUp).
-    if (e.pointerType === 'touch') {
+    if (touch) {
       tapRef.current = { x, y };
+      cancelLongPress();
+      longPressRef.current = window.setTimeout(() => {
+        longPressRef.current = null;
+        if (!tapRef.current) return;
+        tapRef.current = null;
+        inspectRef.current = true;
+        navigator.vibrate?.(10);
+        draw();
+      }, LONG_PRESS_MS);
       draw();
       return;
     }
@@ -1125,14 +1215,21 @@ export function Chart(props: Props) {
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
+    if (!e.isPrimary || pinchRef.current) return;
     const { x, y } = pos(e);
     hoverRef.current = { x, y };
     const tap = tapRef.current;
-    if (tap && Math.abs(x - tap.x) + Math.abs(y - tap.y) > 10) tapRef.current = null;
+    if (tap && Math.abs(x - tap.x) + Math.abs(y - tap.y) > 10) {
+      tapRef.current = null;
+      cancelLongPress();
+    }
     const d = dragRef.current;
     const g = geomRef.current;
     if (d && g) {
-      if (Math.abs(x - d.startX) + Math.abs(y - d.startY) > 4) d.moved = true;
+      if (Math.abs(x - d.startX) + Math.abs(y - d.startY) > 4) {
+        d.moved = true;
+        cancelLongPress();
+      }
       if (d.kind === 'axis') {
         const p = propsRef.current;
         lastMoveRef.current = performance.now();
@@ -1153,7 +1250,9 @@ export function Chart(props: Props) {
     draw();
   };
 
-  const onPointerUp = () => {
+  const onPointerUp = (e: React.PointerEvent) => {
+    if (!e.isPrimary) return;
+    cancelLongPress();
     const tap = tapRef.current;
     tapRef.current = null;
     if (tap && geomRef.current) act(geomRef.current, tap.x, tap.y);
@@ -1208,13 +1307,15 @@ export function Chart(props: Props) {
         onPointerUp={onPointerUp}
         onPointerCancel={() => {
           // The browser took over (usually a scroll): drop the gesture without acting on it.
+          cancelLongPress();
           tapRef.current = null;
           dragRef.current = null;
           hoverRef.current = null;
           draw();
         }}
         onPointerLeave={() => {
-          if (!dragRef.current) {
+          // An inspect keeps its crosshair after the finger lifts.
+          if (!dragRef.current && !inspectRef.current) {
             hoverRef.current = null;
             draw();
           }
