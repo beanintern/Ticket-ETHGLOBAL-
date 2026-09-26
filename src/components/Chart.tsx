@@ -267,7 +267,7 @@ export function Chart(props: Props) {
     geomRef.current = g;
     // What this frame drew, for the automated chart check (scripts/check-chart.mjs).
     const dbg = {
-      zones: [] as { kind: string; v: number; level: number; runs: [number, number][]; t: number; cell: number }[],
+      zones: [] as { kind: string; v: number; level: number; runs: [number, number][]; t: number; cell: number; cells?: number; width?: number; compact?: boolean }[],
       tags: [] as { dir: string; kind: string }[],
       rects: [] as [number, number, number, number][],
       firstExp: 0,
@@ -680,6 +680,43 @@ export function Chart(props: Props) {
         const rgb = kind === 'profit' ? C.profit : C.loss;
         const col = `rgb(${rgb.join(',')})`;
         const cx = (c: number) => x0 + (c + 0.5) * hc;
+        const atExpiry = colRuns(cEx);
+        dbg.zones.push({ kind, v, level, runs: atExpiry, t: xToT(cx(cEx)), cell: hc });
+
+        // A zone only a few cells big can't be traced cleanly (it comes out as a hook or a jagged
+        // sliver), so mark it compactly instead: a bracket on the expiry line over the prices
+        // where the max is reached.
+        let cells = 0;
+        let firstCol = cEx;
+        for (let c = 0; c <= cEx; c++)
+          for (let r = 0; r < rows; r++)
+            if (inside(c, r)) {
+              cells++;
+              firstCol = Math.min(firstCol, c);
+            }
+        const zoneW = (cEx - firstCol + 1) * hc;
+        const areaPx = cells * hc * hc;
+        const compact = cells > 0 && (zoneW < 40 || areaPx / zoneW < 12 || areaPx < 4000);
+        Object.assign(dbg.zones[dbg.zones.length - 1], { cells, width: zoneW, compact });
+
+        if (compact) {
+          ctx.strokeStyle = `rgba(${rgb.join(',')},0.95)`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          const bx = ex + 4;
+          for (const [a0, b0] of atExpiry) {
+            const mid = (a0 + b0) / 2;
+            const a = Math.min(a0, mid - 4);
+            const b = Math.max(b0, mid + 4);
+            ctx.moveTo(bx + 5, a);
+            ctx.lineTo(bx, a);
+            ctx.lineTo(bx, b);
+            ctx.lineTo(bx + 5, b);
+          }
+          ctx.stroke();
+          ctx.lineWidth = 1;
+        }
+        if (!compact) {
         ctx.save();
         ctx.beginPath();
         ctx.rect(x0, plotT, ex - x0 + 1, plotB - plotT);
@@ -707,8 +744,6 @@ export function Chart(props: Props) {
           ctx.lineTo(ex, y);
         }
         // Closing edges: the expiry line, and "now" if you're already in the zone.
-        const atExpiry = colRuns(cEx);
-        dbg.zones.push({ kind, v, level, runs: atExpiry, t: xToT(cx(cEx)), cell: hc });
         for (const [a, b] of atExpiry) {
           ctx.moveTo(ex, a);
           ctx.lineTo(ex, b);
@@ -720,6 +755,7 @@ export function Chart(props: Props) {
         ctx.stroke();
         ctx.restore();
         ctx.lineWidth = 1;
+        }
         if (!atExpiry.length) return;
 
         // Caption the zone nearest spot, inside its closed edge at expiry.
@@ -733,7 +769,16 @@ export function Chart(props: Props) {
         else if (atBottom) where = `below ${strikeLabel(y0)}`;
         else where = `${strikeLabel(y1)} – ${strikeLabel(y0)}`;
         const title = `${kind === 'profit' ? 'MAX PROFIT' : 'MAX LOSS'} ${signedUsd(v)}`;
-        const capY = !atTop ? (y1 - y0 >= 22 ? y0 + 12 : y0 - 10) : !atBottom ? y1 - 10 : y0 + 12;
+        // Compact markers get the caption level with the bracket; outlines inside their closed edge.
+        const capY = compact
+          ? (Math.max(y0, plotT) + Math.min(y1, plotB)) / 2
+          : !atTop
+            ? y1 - y0 >= 22
+              ? y0 + 12
+              : y0 - 10
+            : !atBottom
+              ? y1 - 10
+              : y0 + 12;
         ctx.font = `600 10.5px ${MONO}`;
         const full = mixedExpiry ? `${title} · ${where} on ${fmtTime(firstExp, false)}` : `${title} · ${where}`;
         const text = ctx.measureText(full).width < ex - nowX - 16 ? full : title;
