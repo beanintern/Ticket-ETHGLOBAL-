@@ -12,7 +12,7 @@ import {
   type Expiry,
   type MarketSpec,
 } from '../lib/market';
-import type { Leg, Model, Side } from '../lib/strategy';
+import { buildModel, type Leg, type Model, type Side } from '../lib/strategy';
 
 export type Tool = 'pointer' | 'buyC' | 'sellC' | 'buyP' | 'sellP';
 
@@ -227,15 +227,10 @@ export function Chart(props: Props) {
     const legsForPnl = dragLeg
       ? legs.map((l) => (l.id === dragLeg.id ? { ...l, strike: dragLeg.strike!, expiry: dragLeg.expiry! } : l))
       : legs;
-    const pnlFn = (S: number, t: number) => {
-      let s = 0;
-      for (let i = 0; i < legsForPnl.length; i++) {
-        const l = legsForPnl[i];
-        const iv = l === legs[i] ? model.ivs[i] : impliedVol(spec, spot, l.strike, Math.max((l.expiry - now) / YEAR, 1e-6));
-        s += l.side * l.qty * (bsPrice(l.type, S, l.strike, (l.expiry - t) / YEAR, iv) - model.entries[i]);
-      }
-      return s;
-    };
+    // Re-price the dragged leg at its new strike/expiry, so the map shows the trade as it
+    // would be if you dropped it here (new premium, not the old one).
+    const liveModel = dragLeg ? buildModel(legsForPnl, spec, spot, now) : model;
+    const pnlFn = liveModel.pnl;
 
     // ---- P&L heat map over (time, price) ----
     // Only paint up to the last expiry: after that everything has settled.
@@ -247,7 +242,7 @@ export function Chart(props: Props) {
     if (legsForPnl.length && cols > 0 && rows > 0) {
       const key = [
         legsForPnl.map((l) => `${l.type}${l.side}${l.strike}@${l.expiry}x${l.qty}`).join('|'),
-        model.entries.map((e) => e.toFixed(4)).join(','),
+        liveModel.entries.map((e) => e.toFixed(4)).join(','),
         spot.toFixed(4),
         Math.floor(now / 30000),
         w,

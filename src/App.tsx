@@ -194,7 +194,50 @@ export default function App() {
   const chartModel = buildModel(chartLegs, spec, spot, now);
   const builderModel = buildModel(builderLegs, spec, spot, now);
 
-  const setLegs = useCallback((fn: (legs: Leg[]) => Leg[]) => setBuilder((b) => ({ ...b, [asset]: fn(b[asset]) })), [asset]);
+  // Undo / redo for ticket edits. Each entry is the whole builder plus the market it was edited on.
+  // Placing an order is a real (paper) trade, so it clears the history instead of being undoable.
+  type Snapshot = { builder: Record<Asset, Leg[]>; asset: Asset };
+  const builderRef = useRef(builder);
+  builderRef.current = builder;
+  const history = useRef<{ past: Snapshot[]; future: Snapshot[] }>({ past: [], future: [] });
+  const [, setHistoryVersion] = useState(0);
+  const canUndo = history.current.past.length > 0;
+  const canRedo = history.current.future.length > 0;
+
+  const setLegs = useCallback(
+    (fn: (legs: Leg[]) => Leg[]) => {
+      const b = builderRef.current;
+      const next = fn(b[asset]);
+      if (next === b[asset]) return;
+      const h = history.current;
+      h.past.push({ builder: b, asset });
+      if (h.past.length > 200) h.past.shift();
+      h.future = [];
+      builderRef.current = { ...b, [asset]: next };
+      setBuilder(builderRef.current);
+      setHistoryVersion((v) => v + 1);
+    },
+    [asset],
+  );
+
+  const stepHistory = useCallback(
+    (dir: 'undo' | 'redo') => {
+      const h = history.current;
+      const from = dir === 'undo' ? h.past : h.future;
+      const to = dir === 'undo' ? h.future : h.past;
+      const snap = from.pop();
+      if (!snap) return;
+      to.push({ builder: builderRef.current, asset });
+      builderRef.current = snap.builder;
+      setBuilder(snap.builder);
+      if (snap.asset !== asset) setAsset(snap.asset);
+      setFocus({ kind: 'builder' });
+      setTab('build');
+      setSelectedLegId(null);
+      setHistoryVersion((v) => v + 1);
+    },
+    [asset],
+  );
 
   const onAdd = useCallback(
     (type: OptType, side: Side, strike: number, expiry: number) => {
@@ -224,10 +267,19 @@ export default function App() {
   );
   const onRemove = useCallback((id: string) => setLegs((legs) => legs.filter((l) => l.id !== id)), [setLegs]);
 
-  // Keyboard: 1-4 pick a leg tool, V pointer, Delete removes the selected leg.
+  // Keyboard: 1-4 pick a leg tool, V pointer, Delete removes the selected leg,
+  // Cmd/Ctrl+Z undo, Cmd/Ctrl+Shift+Z or Ctrl+Y redo.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.closest('input, textarea, select')) return;
+      if (e.metaKey || e.ctrlKey) {
+        const k = e.key.toLowerCase();
+        if (k === 'z' || k === 'y') {
+          e.preventDefault();
+          stepHistory(k === 'y' || e.shiftKey ? 'redo' : 'undo');
+        }
+        return;
+      }
       const map: Record<string, Tool> = { '1': 'buyC', '2': 'sellC', '3': 'buyP', '4': 'sellP', v: 'pointer', Escape: 'pointer' };
       if (map[e.key]) setTool(map[e.key]);
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedLegId) {
@@ -237,14 +289,16 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedLegId, onRemove]);
+  }, [selectedLegId, onRemove, stepHistory]);
 
   const placeOrder = () => {
     if (!builderLegs.length) return;
     const legs = builderLegs.map((l, i) => ({ ...l, id: newId(), entry: builderModel.marks[i] }));
     const pos: Position = { id: newId('pos'), asset, name: describe(legs), legs, openedAt: now, openSpot: spot };
     setPositions((p) => [pos, ...p]);
-    setLegs(() => []);
+    builderRef.current = { ...builderRef.current, [asset]: [] };
+    setBuilder(builderRef.current);
+    history.current = { past: [], future: [] };
     setSelectedLegId(null);
     setTab('positions');
     setToast(`Filled (paper): ${pos.name}`);
@@ -336,6 +390,18 @@ export default function App() {
                   </button>
                 );
               })}
+            </div>
+            <div className="history" role="group" aria-label="History">
+              <button className="tool icon" onClick={() => stepHistory('undo')} disabled={!canUndo} title="Undo (Ctrl/⌘ Z)" aria-label="Undo">
+                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                  <path d="M5 3L2 6l3 3M2.5 6H9a3 3 0 010 6H6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+              <button className="tool icon" onClick={() => stepHistory('redo')} disabled={!canRedo} title="Redo (Ctrl/⌘ Shift Z)" aria-label="Redo">
+                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                  <path d="M9 3l3 3-3 3M11.5 6H5a3 3 0 000 6h3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
             </div>
             <div className="chart-controls">
               {focusedPosition ? (
