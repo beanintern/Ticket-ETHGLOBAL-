@@ -247,6 +247,8 @@ export function Chart(props: Props) {
     const { w, h, dpr } = sizeRef.current;
     if (!canvas || w < 50 || h < 50) return;
     const ctx = canvas.getContext('2d')!;
+    ctx.save();
+    try {
     const p = propsRef.current;
     const { spec, candles, spot, now, expiries, model, editableLegs, staticLegs, tool, selectedLegId, view } = p;
     const g = computeGeom();
@@ -294,7 +296,10 @@ export function Chart(props: Props) {
     // ---- P&L heat map over (time, price) ----
     // Only paint up to the last expiry: after that everything has settled.
     const lastExp = legsForPnl.length ? Math.max(...legsForPnl.map((l) => l.expiry)) : now;
-    const heatR = Math.min(plotR, tToX(lastExp));
+    // Up to the last expiry the map shows live P&L; after it, the settled result carries on to the
+    // right edge (drawn lighter), so a zoomed-out view never looks empty.
+    const expR = Math.min(plotR, tToX(lastExp));
+    const heatR = plotR;
     const cell = performance.now() - lastMoveRef.current < 200 ? CELL_MOVING : CELL;
     // Heat starts at whichever is later: now, or the left edge (when panned into the future).
     const hx0 = Math.max(nowX, 0);
@@ -321,7 +326,8 @@ export function Chart(props: Props) {
         for (let c = 0; c < cols; c++) {
           const t = xToT(hx0 + (c + 0.5) * cell);
           for (let r = 0; r < rows; r++) {
-            const v = pnlFn(yToP(plotT + (r + 0.5) * cell), t);
+            const raw = pnlFn(yToP(plotT + (r + 0.5) * cell), t);
+            const v = Number.isFinite(raw) ? raw : 0;
             vals[r * cols + c] = v;
             mx = Math.max(mx, Math.abs(v));
           }
@@ -333,9 +339,11 @@ export function Chart(props: Props) {
         const img = octx.createImageData(cols, rows);
         const contour: number[][] = [];
         if (mx > 1e-9) {
+          const settledFrom = Math.floor((expR - hx0) / cell);
           for (let i = 0; i < vals.length; i++) {
             const v = vals[i];
-            const a = Math.pow(Math.abs(v) / mx, 0.75);
+            const fade = i % cols > settledFrom ? 0.4 : 1;
+            const a = Math.pow(Math.abs(v) / mx, 0.75) * fade;
             const rgb = v >= 0 ? C.profit : C.loss;
             img.data[i * 4] = rgb[0];
             img.data[i * 4 + 1] = rgb[1];
@@ -988,6 +996,10 @@ export function Chart(props: Props) {
     else if (hover && hover.x > plotR + PW) cursor = 'ns-resize';
     else if (snap && tool !== 'pointer') cursor = 'crosshair';
     canvas.style.cursor = cursor;
+    } finally {
+      // Always unwind, so a frame that fails part-way can't leave a clip behind and blank the next.
+      ctx.restore();
+    }
   }, [computeGeom, snapAt]);
 
   // Size canvas to container.
