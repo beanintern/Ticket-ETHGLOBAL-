@@ -11,7 +11,7 @@ import {
   type MarketSpec,
 } from '../lib/market';
 import type { Market } from '../data/types';
-import { buildModel, type Leg, type Model, type Side } from '../lib/strategy';
+import { buildModel, lifetimeExtremes, type Leg, type Model, type Side } from '../lib/strategy';
 
 export type Tool = 'pointer' | 'buyC' | 'sellC' | 'buyP' | 'sellP';
 
@@ -606,41 +606,20 @@ export function Chart(props: Props) {
     ctx.textAlign = 'center';
     ctx.fillText('NOW', Math.max(nowX, 16), plotB + TIME_H / 2);
 
-    // ---- Payoff caps at the first expiry ----
-    // A capped structure (spread, condor) plateaus at max profit / max loss. The heat map alone
-    // just shows a flat colour there, so bracket the plateau and label it.
+    // ---- Max profit / max loss ----
+    // Measured over the position's whole life (every expiry and in between), the same as the
+    // Build panel, so nothing on the map can beat the stated max.
     if (legsForPnl.length && maxAbs > 1e-9) {
       const firstExp = Math.min(...legsForPnl.map((l) => l.expiry));
+      const lastExp = Math.max(...legsForPnl.map((l) => l.expiry));
       dbg.firstExp = firstExp;
       const ex = Math.round(Math.min(tToX(firstExp), plotR - 2));
-      // With legs on later expiries, max profit/loss is measured at the first expiry (as in the Build
-      // panel); captions say so.
-      const mixedExpiry = legsForPnl.some((l) => Math.abs(l.expiry - firstExp) > 60_000);
-      let maxP = -Infinity;
-      let minP = Infinity;
-      // Sample a wide price range plus every strike exactly: payoffs have sharp corners at the
-      // strikes, and a grid alone can step over a peak or trough (the Build panel checks strikes too).
-      // (and a price near zero, where puts reach their extremes, as the Build panel does)
-      const probe = [...legsForPnl.map((l) => l.strike), spot * 1e-4];
-      for (let i = 0; i <= 600; i++) probe.push(spot * Math.exp(Math.log(0.05) + Math.log(400) * (i / 600)));
-      let maxS = spot;
-      let minS = spot;
-      for (const S of probe) {
-        const v = pnlFn(S, firstExp);
-        if (v > maxP) [maxP, maxS] = [v, S];
-        if (v < minP) [minP, minS] = [v, S];
-      }
-      // Soft peaks (legs on several dates) fall between grid points: zoom in around each extreme.
-      for (let i = -100; i <= 100; i++) {
-        const f = Math.exp(0.02 * (i / 100));
-        maxP = Math.max(maxP, pnlFn(maxS * f, firstExp));
-        minP = Math.min(minP, pnlFn(minS * f, firstExp));
-      }
-      const tail = pnlFn(spot * 40, firstExp) - pnlFn(spot * 20, firstExp);
-      const unlimitedProfit = tail > 1e-6 * spot;
-      const unlimitedLoss = tail < -1e-6 * spot;
+      const xLast = Math.round(Math.min(tToX(lastExp), plotR - 2));
+      const mixedExpiry = lastExp - firstExp > 60_000;
+      const ext = lifetimeExtremes(pnlFn, legsForPnl, spot, now);
+      const { maxP, minP, unlimitedProfit, unlimitedLoss } = ext;
       const samples: [number, number][] = [];
-      for (let y = plotT; y <= plotB; y += 2) samples.push([y, pnlFn(yToP(y), firstExp)]);
+      for (const t of [firstExp, lastExp]) for (let y = plotT; y <= plotB; y += 2) samples.push([y, pnlFn(yToP(y), t)]);
       // "Flat" is judged against what's on screen: using the far-off-screen range (up to 20x spot)
       // made the tolerance so wide that a small capped loss next to uncapped profit never counted.
       let visMax = -Infinity;
@@ -661,12 +640,15 @@ export function Chart(props: Props) {
       // Outline where the P&L is actually within ZONE_FRAC of its max (or max loss), traced on the
       // map itself. Max profit/loss is only reached at expiry, so this is a wedge that widens
       // toward the expiry, not a box starting at "now".
-      const drawZone = (kind: 'profit' | 'loss', v: number) => {
+      const drawZone = (kind: 'profit' | 'loss', v: number, tAt: number) => {
         const heat = heatRef.current;
         if (!heat) return;
         const { vals, cols, rows, cell: hc, x0 } = heat;
-        const cEx = Math.min(cols - 1, Math.floor((ex - x0) / hc));
+        // Trace up to the last expiry; caption and compact marker sit where the extreme is reached.
+        const cEx = Math.min(cols - 1, Math.floor((xLast - x0) / hc));
         if (cEx < 0 || rows < 2) return;
+        const xRef = Math.round(Math.min(tToX(tAt), plotR - 2));
+        const cRef = Math.max(0, Math.min(cEx, Math.floor((xRef - x0) / hc)));
         const level = v * (1 - ZONE_FRAC);
         const inside = (c: number, r: number) => (kind === 'profit' ? vals[r * cols + c] >= level : vals[r * cols + c] <= level);
         const yOf = (c: number, r: number) => {
@@ -696,8 +678,11 @@ export function Chart(props: Props) {
         const rgb = kind === 'profit' ? C.profit : C.loss;
         const col = `rgb(${rgb.join(',')})`;
         const cx = (c: number) => x0 + (c + 0.5) * hc;
-        const atExpiry = colRuns(cEx);
-        dbg.zones.push({ kind, v, level, runs: atExpiry, t: xToT(cx(cEx)), cell: hc });
+        // Runs where the extreme is reached (for the caption and compact marker), and at the last
+        // expiry (the outline's closing edge).
+        const atExpiry = colRuns(cRef);
+        const atEnd = colRuns(cEx);
+        dbg.zones.push({ kind, v, level, runs: atExpiry, t: xToT(cx(cRef)), cell: hc });
 
         // A zone only a few cells big can't be traced cleanly (it comes out as a hook or a jagged
         // sliver), so mark it compactly instead: a bracket on the expiry line over the prices
@@ -719,7 +704,7 @@ export function Chart(props: Props) {
           ctx.strokeStyle = `rgba(${rgb.join(',')},0.95)`;
           ctx.lineWidth = 2;
           ctx.beginPath();
-          const bx = ex + 4;
+          const bx = xRef + 4;
           for (const [a0, b0] of atExpiry) {
             const mid = (a0 + b0) / 2;
             const a = Math.min(a0, mid - 4);
@@ -735,7 +720,7 @@ export function Chart(props: Props) {
         if (!compact) {
         ctx.save();
         ctx.beginPath();
-        ctx.rect(x0, plotT, ex - x0 + 1, plotB - plotT);
+        ctx.rect(x0, plotT, xLast - x0 + 1, plotB - plotT);
         ctx.clip();
         ctx.strokeStyle = `rgba(${rgb.join(',')},0.95)`;
         ctx.lineWidth = 1.5;
@@ -757,12 +742,12 @@ export function Chart(props: Props) {
         }
         for (const y of cross[cEx]) {
           ctx.moveTo(cx(cEx), y);
-          ctx.lineTo(ex, y);
+          ctx.lineTo(xLast, y);
         }
         // Closing edges: the expiry line, and "now" if you're already in the zone.
-        for (const [a, b] of atExpiry) {
-          ctx.moveTo(ex, a);
-          ctx.lineTo(ex, b);
+        for (const [a, b] of atEnd) {
+          ctx.moveTo(xLast, a);
+          ctx.lineTo(xLast, b);
         }
         for (const [a, b] of colRuns(0)) {
           ctx.moveTo(x0 + 0.75, a);
@@ -796,10 +781,10 @@ export function Chart(props: Props) {
               ? y1 - 10
               : y0 + 12;
         ctx.font = `600 10.5px ${MONO}`;
-        const full = mixedExpiry ? `${title} · ${where} on ${fmtTime(firstExp, false)}` : `${title} · ${where}`;
-        const text = ctx.measureText(full).width < ex - nowX - 16 ? full : title;
+        const full = mixedExpiry ? `${title} · ${where} on ${fmtTime(tAt, false)}` : `${title} · ${where}`;
+        const text = ctx.measureText(full).width < xRef - nowX - 16 ? full : title;
         const tw = ctx.measureText(text).width;
-        const tx = Math.max(nowX + 6, ex - 8 - tw);
+        const tx = Math.max(nowX + 6, xRef - 8 - tw);
         const ty = Math.max(plotT + 8, Math.min(plotB - 8, capY));
         ctx.fillStyle = 'rgba(12,15,20,0.72)';
         ctx.fillRect(tx - 4, ty - 8, tw + 8, 16);
@@ -810,8 +795,8 @@ export function Chart(props: Props) {
         ctx.fillText(text, tx, ty + 0.5);
       };
 
-      if (maxP > tol && !unlimitedProfit) drawZone('profit', maxP);
-      if (minP < -tol && !unlimitedLoss) drawZone('loss', minP);
+      if (maxP > tol && !unlimitedProfit) drawZone('profit', maxP, ext.maxT);
+      if (minP < -tol && !unlimitedLoss) drawZone('loss', minP, ext.minT);
 
       // ---- Open-ended tails ----
       // Past the outermost strike the payoff is a straight line. If it keeps falling, the loss has
@@ -820,10 +805,11 @@ export function Chart(props: Props) {
       const strikes = legsForPnl.map((l) => l.strike);
       const kMax = Math.max(...strikes);
       const kMin = Math.min(...strikes);
-      const lowTail = pnlFn(spot * 0.02, firstExp) - pnlFn(spot * 0.04, firstExp);
-      const downLoss = lowTail < -1e-6 * spot;
-      const downProfit = lowTail > 1e-6 * spot;
-      const atZero = pnlFn(spot * 1e-4, firstExp);
+      const downLoss = ext.lossToZero;
+      const downProfit = !downLoss && ext.profitToZero;
+      // Value if the price went to ~0, at whichever expiry is most extreme.
+      const zeroVals = [...new Set(legsForPnl.map((l) => l.expiry))].map((e) => pnlFn(spot * 1e-4, e));
+      const atZero = downLoss ? Math.min(...zeroVals) : Math.max(...zeroVals);
       // Hatch the open-ended loss zone exactly where it is on the map: in each column, the run of
       // losing cells that touches the top (upside tail) or bottom (downside tail) edge.
       const hatchTail = (dir: 'up' | 'down') => {
@@ -1187,6 +1173,7 @@ export function Chart(props: Props) {
         legs: legsForPnl.map((l) => ({ id: l.id, type: l.type, side: l.side, strike: l.strike, expiry: l.expiry, qty: l.qty, entry: l.entry })),
         markers: markers.map((m) => ({ id: m.id, x: m.x + m.w / 2, y: m.y + m.h / 2 })),
         heat: heat && maxAbs > 1e-9 ? { x0: heat.x0, cell: heat.cell, cols: heat.cols, rows: heat.rows, contour: heat.contour } : null,
+        pnl: pnlFn,
         draw,
       };
     }

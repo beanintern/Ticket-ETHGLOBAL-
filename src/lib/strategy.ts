@@ -84,7 +84,74 @@ export interface Summary {
   greeks: Greeks;
 }
 
-/** Payoff stats at the first expiry in the structure (later legs valued with Black-Scholes). */
+export interface Extremes {
+  maxP: number;
+  maxS: number;
+  /** When the max profit is reached. */
+  maxT: number;
+  minP: number;
+  minS: number;
+  minT: number;
+  unlimitedProfit: boolean;
+  unlimitedLoss: boolean;
+  /** Loss keeps growing as price falls, until it reaches zero (e.g. a short put). */
+  lossToZero: boolean;
+  /** Profit keeps growing as price falls, until it reaches zero (e.g. a long put). */
+  profitToZero: boolean;
+}
+
+/**
+ * Best and worst P&L over the position's whole life, not just at the first expiry: legs that
+ * expire later can keep adding (or losing) value after an earlier leg has settled. Samples every
+ * expiry and points in between, a wide price range plus every strike exactly, then zooms in.
+ */
+export function lifetimeExtremes(pnl: (S: number, t: number) => number, legs: Leg[], spot: number, now: number): Extremes {
+  const exps = [...new Set(legs.map((l) => l.expiry))].sort((a, b) => a - b);
+  const times: number[] = [];
+  let prev = now;
+  for (const e of exps) {
+    for (let k = 1; k < 5; k++) times.push(prev + ((e - prev) * k) / 5);
+    times.push(e);
+    prev = e;
+  }
+  const probe = [...legs.map((l) => l.strike), spot * 1e-4];
+  for (let i = 0; i <= 600; i++) probe.push(spot * Math.exp(Math.log(0.05) + Math.log(400) * (i / 600)));
+  let maxP = -Infinity, maxS = spot, maxT = exps[0];
+  let minP = Infinity, minS = spot, minT = exps[0];
+  for (const t of times) {
+    for (const S of probe) {
+      const v = pnl(S, t);
+      if (v > maxP) [maxP, maxS, maxT] = [v, S, t];
+      if (v < minP) [minP, minS, minT] = [v, S, t];
+    }
+  }
+  // Peaks can fall between samples: zoom in around each extreme in price.
+  for (let i = -100; i <= 100; i++) {
+    const f = Math.exp(0.02 * (i / 100));
+    const a = pnl(maxS * f, maxT);
+    if (a > maxP) [maxP] = [a];
+    const b = pnl(minS * f, minT);
+    if (b < minP) [minP] = [b];
+  }
+  // Open-ended tails: does P&L keep rising/falling far above spot, or down toward zero, at any
+  // expiry?
+  const eps = 1e-6 * spot;
+  let unlimitedProfit = false, unlimitedLoss = false, lossToZero = false, profitToZero = false;
+  for (const e of exps) {
+    const up = pnl(spot * 40, e) - pnl(spot * 20, e);
+    if (up > eps) unlimitedProfit = true;
+    if (up < -eps) unlimitedLoss = true;
+    const down = pnl(spot * 0.02, e) - pnl(spot * 0.04, e);
+    if (down < -eps) lossToZero = true;
+    if (down > eps) profitToZero = true;
+  }
+  return { maxP, maxS, maxT, minP, minS, minT, unlimitedProfit, unlimitedLoss, lossToZero, profitToZero };
+}
+
+/**
+ * Payoff stats. Max profit / max loss cover the position's whole life; break-evens and chance of
+ * profit are at the first expiry (later legs valued with Black-Scholes).
+ */
 export function summarize(model: Model, market: Market, now: number): Summary | null {
   const spot = market.spot;
   const { legs } = model;
@@ -98,26 +165,10 @@ export function summarize(model: Model, market: Market, now: number): Summary | 
   grid.sort((a, b) => a - b);
   const vals = grid.map((S) => model.pnl(S, horizon));
 
-  let maxProfit = -Infinity;
-  let maxLoss = Infinity;
-  let maxS = spot;
-  let minS = spot;
-  vals.forEach((v, i) => {
-    if (v > maxProfit) [maxProfit, maxS] = [v, grid[i]];
-    if (v < maxLoss) [maxLoss, minS] = [v, grid[i]];
-  });
-  // Soft peaks (legs on several dates) fall between grid points: zoom in around each extreme.
-  for (let i = -100; i <= 100; i++) {
-    const f = Math.exp(0.01 * (i / 100));
-    maxProfit = Math.max(maxProfit, model.pnl(maxS * f, horizon));
-    maxLoss = Math.min(maxLoss, model.pnl(minS * f, horizon));
-  }
-  const far1 = model.pnl(spot * 20, horizon);
-  const far2 = model.pnl(spot * 40, horizon);
-  const eps = 1e-6 * spot;
-  const unlimitedProfit = far2 - far1 > eps;
-  const unlimitedLoss = far1 - far2 > eps;
-  const lossToZero = model.pnl(spot * 0.02, horizon) - model.pnl(spot * 0.04, horizon) < -eps;
+  const ext = lifetimeExtremes(model.pnl, legs, spot, now);
+  const { unlimitedProfit, unlimitedLoss, lossToZero } = ext;
+  const maxProfit = ext.maxP;
+  const maxLoss = ext.minP;
 
   const breakevens: number[] = [];
   for (let i = 1; i < vals.length; i++) {

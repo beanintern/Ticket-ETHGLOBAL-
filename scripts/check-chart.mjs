@@ -9,7 +9,8 @@
 //   2. the P&L colours: green where the position makes money, red where it loses, and clearly
 //      stronger for big P&L than for small P&L
 //   3. the break-even line matches where P&L actually crosses zero
-//   4. max profit / max loss outlines: value and price band at expiry
+//   4. max profit / max loss (over the position's whole life): value, price band, and that no
+//      P&L on the map beats it
 //   5. uncapped-profit / uncapped-loss tags appear exactly when they should
 //   6. the Build panel's max profit / max loss agree
 import { chromium } from 'playwright';
@@ -172,15 +173,24 @@ function inspect() {
   }
 
   // ---- 4 & 5. max profit / loss zones and uncapped tags ----
+  // Max profit / loss over the position's whole life: every expiry, and times in between.
+  const exps = [...new Set(legs.map((l) => l.expiry))].sort((a, b) => a - b);
+  const times = [];
+  { let prev = now; for (const e of exps) { for (let k = 1; k < 10; k++) times.push(prev + ((e - prev) * k) / 10); times.push(e); prev = e; } }
   const probe = [...legs.map((l) => l.strike), spot * 1e-4];
-  for (let i = 0; i <= 2000; i++) probe.push(spot * Math.exp(Math.log(0.05) + Math.log(400) * (i / 2000)));
+  for (let i = 0; i <= 1500; i++) probe.push(spot * Math.exp(Math.log(0.05) + Math.log(400) * (i / 1500)));
   let maxP = -Infinity, minP = Infinity;
-  for (const S of probe) { const v = pnl(S, firstExp); maxP = Math.max(maxP, v); minP = Math.min(minP, v); }
-  const tail = pnl(spot * 40, firstExp) - pnl(spot * 20, firstExp);
-  const unlimitedProfit = tail > 1e-6 * spot, unlimitedLoss = tail < -1e-6 * spot;
-  const low = pnl(spot * 0.02, firstExp) - pnl(spot * 0.04, firstExp);
+  for (const t of times) for (const S of probe) { const v = pnl(S, t); maxP = Math.max(maxP, v); minP = Math.min(minP, v); }
+  let unlimitedProfit = false, unlimitedLoss = false, lossToZero = false, profitToZero = false;
+  for (const e of exps) {
+    const up = pnl(spot * 40, e) - pnl(spot * 20, e), down = pnl(spot * 0.02, e) - pnl(spot * 0.04, e);
+    if (up > 1e-6 * spot) unlimitedProfit = true;
+    if (up < -1e-6 * spot) unlimitedLoss = true;
+    if (down < -1e-6 * spot) lossToZero = true;
+    if (down > 1e-6 * spot) profitToZero = true;
+  }
   let visMax = -Infinity, visMin = Infinity;
-  for (let y = plotT; y <= plotB; y += 2) { const v = pnl(K.yToP(y), firstExp); visMax = Math.max(visMax, v); visMin = Math.min(visMin, v); }
+  for (const t of [firstExp, lastExp]) for (let y = plotT; y <= plotB; y += 2) { const v = pnl(K.yToP(y), t); visMax = Math.max(visMax, v); visMin = Math.min(visMin, v); }
   const tolV = Math.max(0, visMax - visMin) * 0.004 + 1e-6;
   const wantZones = { profit: maxP > tolV && !unlimitedProfit, loss: minP < -tolV && !unlimitedLoss };
   for (const kind of ['profit', 'loss']) {
@@ -189,6 +199,18 @@ function inspect() {
     if (!wantZones[kind]) { if (z) fail(`${kind} zone drawn but max ${kind} is ${kind === 'profit' ? 'uncapped' : 'uncapped or ~0'}`); continue; }
     if (!z) { fail(`max ${kind} zone missing (expected ${want.toFixed(2)})`); continue; }
     if (Math.abs(z.v - want) > Math.abs(want) * 0.01 + 0.05) fail(`max ${kind} ${z.v.toFixed(2)}, expected ${want.toFixed(2)}`);
+    // Nothing on the map may beat the stated max (or be worse than the stated max loss).
+    let beyond = null;
+    for (let i = 0; i <= 40 && !beyond; i++) {
+      const t = now + ((lastExp - now) * i) / 40;
+      for (let j = 0; j <= 60; j++) {
+        const S = K.yToP(plotT + ((plotB - plotT) * j) / 60);
+        const v = pnl(S, t);
+        const over = kind === 'profit' ? v - z.v : z.v - v;
+        if (over > Math.abs(z.v) * 0.005 + 0.05) { beyond = `${v.toFixed(2)} at ${S.toFixed(0)} on ${new Date(t).toISOString().slice(0, 13)}`; break; }
+      }
+    }
+    if (beyond) fail(`P&L ${beyond} beats the stated max ${kind} ${z.v.toFixed(2)}`);
     // Where is P&L within 5% of the max at the zone's reference time?
     const level = want * 0.95;
     const inside = (y) => (kind === 'profit' ? pnl(K.yToP(y), z.t) >= level : pnl(K.yToP(y), z.t) <= level);
@@ -208,7 +230,7 @@ function inspect() {
   }
   const wantTags = [];
   if (unlimitedLoss) wantTags.push('up:loss'); else if (unlimitedProfit) wantTags.push('up:profit');
-  if (low < -1e-6 * spot) wantTags.push('down:loss'); else if (low > 1e-6 * spot) wantTags.push('down:profit');
+  if (lossToZero) wantTags.push('down:loss'); else if (profitToZero) wantTags.push('down:profit');
   const gotTags = K.tags.map((t) => `${t.dir}:${t.kind}`);
   if (wantTags.sort().join() !== gotTags.sort().join()) fail(`tags ${gotTags.join(',') || 'none'}, expected ${wantTags.join(',') || 'none'}`);
 
@@ -246,7 +268,17 @@ for (let n = 0; n < N; n++) {
   const shared = pick(inView);
   const legs = [];
   const count = 1 + Math.floor(rand() * 5);
-  for (let i = 0; i < count; i++) {
+  // One in five: 2-4 legs spread over several nearby dates. These are the positions whose best or
+  // worst outcome can come after the first expiry.
+  const nearby = inView.filter((e) => e - now < 40 * DAY);
+  if (rand() < 0.2 && nearby.length >= 2) {
+    for (let i = 0, k = 2 + Math.floor(rand() * 3); i < k; i++) {
+      const e = pick(nearby);
+      const st = e - now > 21 * DAY ? spec.strikeStep * 2 : spec.strikeStep;
+      legs.push({ type: rand() < 0.5 ? 'C' : 'P', side: rand() < 0.5 ? 1 : -1, qty: 1, expiry: e, strike: Math.max(st, Math.round((spot * Math.exp(0.1 * (rand() * 2 - 1))) / st) * st) });
+    }
+  }
+  for (let i = 0; i < (legs.length ? 0 : count); i++) {
     const expiry = oneDate ? shared : pick(inView);
     const step = expiry - now > 21 * DAY ? spec.strikeStep * 2 : spec.strikeStep;
     const strike = Math.max(step, Math.round((spot * Math.exp(0.08 * gauss())) / step) * step);
