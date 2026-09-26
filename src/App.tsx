@@ -359,7 +359,7 @@ export default function App() {
                   setAsset(a);
                   setFocus({ kind: 'builder' });
                   setSelectedLegId(null);
-                  setView((v) => ({ ...v, yZoom: 1, yShift: 0 }));
+                  setView((v) => ({ ...v, yZoom: 1, yShift: 0, nowFrac: undefined }));
                 }}
               >
                 <span className="market-sym">{a}</span>
@@ -492,9 +492,9 @@ export default function App() {
             <span>
               <i className="sw sw-open" /> Uncapped loss
             </span>
-            <span className="hint-touch">Tap to place · hold to inspect · hold a dot to remove · pinch to zoom</span>
+            <span className="hint-touch">Tap to place · swipe sideways to pan · hold to inspect · hold a dot to remove · pinch to zoom</span>
             <span className="hint">
-              Click an expiry column to add a leg · drag legs to move · right-click to remove · scroll to zoom time, shift-scroll or drag the price axis for price
+              Click to add a leg · drag the chart to pan · drag legs to move · right-click to remove · scroll to zoom, shift-scroll for price · double-click to reset
             </span>
           </div>
         </section>

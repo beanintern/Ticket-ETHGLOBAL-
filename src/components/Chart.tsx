@@ -24,9 +24,12 @@ export const TOOL_LEG: Record<Exclude<Tool, 'pointer'>, { type: OptType; side: S
 };
 
 export interface ChartView {
+  /** Future time visible to the right of "now" at the default pan position. */
   horizon: number;
   yZoom: number;
   yShift: number;
+  /** Where the "now" line sits, as a fraction of the plot width (panning moves it). Unset = default. */
+  nowFrac?: number;
 }
 
 interface Props {
@@ -86,6 +89,7 @@ const MONO = '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
 const SANS = 'Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
 
 interface Geom {
+  baseFrac: number;
   axisW: number;
   profileW: number;
   w: number;
@@ -113,7 +117,9 @@ interface Marker {
 }
 
 interface DragState {
-  kind: 'leg' | 'axis';
+  kind: 'leg' | 'axis' | 'pan';
+  startFrac?: number;
+  touch?: boolean;
   id?: string;
   startX: number;
   startY: number;
@@ -178,7 +184,7 @@ export function Chart(props: Props) {
   const geomRef = useRef<Geom | null>(null);
   const lastMoveRef = useRef(0);
   const zoomRef = useRef<{ horizon: number; yZoom: number; raf: number; cur: ChartView; sent: ChartView[] } | null>(null);
-  const heatRef = useRef<{ key: string; canvas: HTMLCanvasElement; maxAbs: number; contour: number[] } | null>(null);
+  const heatRef = useRef<{ key: string; canvas: HTMLCanvasElement; maxAbs: number; contour: number[][]; x0: number } | null>(null);
 
   const computeGeom = useCallback((): Geom => {
     const { w, h } = sizeRef.current;
@@ -189,8 +195,10 @@ export function Chart(props: Props) {
     const plotR = w - axisW - profileW;
     const plotT = TOP_H;
     const plotB = h - TIME_H;
-    const nowX = plotR * (narrow ? 0.2 : PAST_FRAC);
-    const pxPerMs = (plotR - nowX) / view.horizon;
+    const baseFrac = narrow ? 0.2 : PAST_FRAC;
+    const nowX = plotR * (view.nowFrac ?? baseFrac);
+    // Scale comes from the default layout, so panning slides the chart without rescaling it.
+    const pxPerMs = (plotR * (1 - baseFrac)) / view.horizon;
     const tToX = (t: number) => nowX + (t - now) * pxPerMs;
     const xToT = (x: number) => now + (x - nowX) / pxPerMs;
 
@@ -212,7 +220,7 @@ export function Chart(props: Props) {
     hi = mid + half;
     const pToY = (p: number) => plotB - ((p - lo) / (hi - lo)) * (plotB - plotT);
     const yToP = (y: number) => lo + ((plotB - y) / (plotB - plotT)) * (hi - lo);
-    return { axisW, profileW, w, h, plotR, plotT, plotB, nowX, lo, hi, tToX, xToT, pToY, yToP };
+    return { baseFrac, axisW, profileW, w, h, plotR, plotT, plotB, nowX, lo, hi, tToX, xToT, pToY, yToP };
   }, []);
 
   /** Nearest listed expiry (by pixels) and strike for a point in the future region. */
@@ -288,7 +296,9 @@ export function Chart(props: Props) {
     const lastExp = legsForPnl.length ? Math.max(...legsForPnl.map((l) => l.expiry)) : now;
     const heatR = Math.min(plotR, tToX(lastExp));
     const cell = performance.now() - lastMoveRef.current < 200 ? CELL_MOVING : CELL;
-    const cols = Math.max(0, Math.ceil((heatR - nowX) / cell));
+    // Heat starts at whichever is later: now, or the left edge (when panned into the future).
+    const hx0 = Math.max(nowX, 0);
+    const cols = Math.max(0, Math.ceil((heatR - hx0) / cell));
     const rows = Math.ceil((plotB - plotT) / cell);
     let maxAbs = 0;
     if (legsForPnl.length && cols > 0 && rows > 0) {
@@ -302,13 +312,14 @@ export function Chart(props: Props) {
         g.lo.toFixed(3),
         g.hi.toFixed(3),
         view.horizon,
+        hx0.toFixed(1),
         cell,
       ].join('#');
       if (!heatRef.current || heatRef.current.key !== key) {
         const vals = new Float32Array(cols * rows);
         let mx = 0;
         for (let c = 0; c < cols; c++) {
-          const t = xToT(nowX + (c + 0.5) * cell);
+          const t = xToT(hx0 + (c + 0.5) * cell);
           for (let r = 0; r < rows; r++) {
             const v = pnlFn(yToP(plotT + (r + 0.5) * cell), t);
             vals[r * cols + c] = v;
@@ -320,7 +331,7 @@ export function Chart(props: Props) {
         off.height = rows;
         const octx = off.getContext('2d')!;
         const img = octx.createImageData(cols, rows);
-        const contour: number[] = [];
+        const contour: number[][] = [];
         if (mx > 1e-9) {
           for (let i = 0; i < vals.length; i++) {
             const v = vals[i];
@@ -331,32 +342,54 @@ export function Chart(props: Props) {
             img.data[i * 4 + 2] = rgb[2];
             img.data[i * 4 + 3] = Math.round(255 * (0.05 + 0.5 * a));
           }
-          // Break-even contour: where P&L changes sign between vertically adjacent cells.
+          // Break-even: per column, the interpolated y of every sign change down the column.
           for (let c = 0; c < cols; c++) {
+            const ys: number[] = [];
             for (let r = 0; r < rows - 1; r++) {
               const a = vals[r * cols + c];
               const b = vals[(r + 1) * cols + c];
-              if ((a >= 0) !== (b >= 0)) {
-                const f = a / (a - b);
-                contour.push(nowX + c * cell, plotT + (r + 0.5 + f) * cell);
-              }
+              if ((a >= 0) !== (b >= 0)) ys.push(plotT + (r + 0.5 + a / (a - b)) * cell);
             }
+            contour.push(ys);
           }
         }
         octx.putImageData(img, 0, 0);
-        heatRef.current = { key, canvas: off, maxAbs: mx, contour };
+        heatRef.current = { key, canvas: off, maxAbs: mx, contour, x0: hx0 };
       }
       const heat = heatRef.current;
       maxAbs = heat.maxAbs;
       if (maxAbs > 1e-9) {
         ctx.save();
         ctx.beginPath();
-        ctx.rect(nowX, plotT, heatR - nowX, plotB - plotT);
+        ctx.rect(hx0, plotT, heatR - hx0, plotB - plotT);
         ctx.clip();
         ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(heat.canvas, nowX, plotT, cols * cell, rows * cell);
-        ctx.fillStyle = 'rgba(227,231,238,0.55)';
-        for (let i = 0; i < heat.contour.length; i += 2) ctx.fillRect(heat.contour[i], heat.contour[i + 1] - 0.6, cell, 1.2);
+        ctx.drawImage(heat.canvas, hx0, plotT, cols * cell, rows * cell);
+        // Break-even as one continuous line: join each crossing to the nearest crossing in the
+        // next column (a line can't jump more than a few cells between neighbouring columns).
+        ctx.strokeStyle = 'rgba(227,231,238,0.6)';
+        ctx.lineWidth = 1.25;
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        const cx = (c: number) => heat.x0 + (c + 0.5) * cell;
+        for (let c = 0; c < heat.contour.length - 1; c++) {
+          const next = heat.contour[c + 1];
+          for (const y of heat.contour[c]) {
+            let best: number | null = null;
+            for (const y2 of next) if (best === null || Math.abs(y2 - y) < Math.abs(best - y)) best = y2;
+            if (best !== null && Math.abs(best - y) < cell * 6) {
+              ctx.moveTo(cx(c), y);
+              ctx.lineTo(cx(c + 1), best);
+            }
+          }
+        }
+        // Extend the first column's crossings back to the now line so the curve starts there.
+        for (const y of heat.contour[0] ?? []) {
+          ctx.moveTo(heat.x0, y);
+          ctx.lineTo(cx(0), y);
+        }
+        ctx.stroke();
+        ctx.lineWidth = 1;
         ctx.restore();
       }
     }
@@ -507,7 +540,7 @@ export function Chart(props: Props) {
     ctx.font = `600 10px ${MONO}`;
     ctx.fillStyle = C.muted;
     ctx.textAlign = 'center';
-    ctx.fillText('NOW', nowX, plotB + TIME_H / 2);
+    ctx.fillText('NOW', Math.max(nowX, 16), plotB + TIME_H / 2);
 
     // ---- Payoff caps at the first expiry ----
     // A capped structure (spread, condor) plateaus at max profit / max loss. The heat map alone
@@ -950,6 +983,7 @@ export function Chart(props: Props) {
     // Cursor.
     let cursor = 'default';
     if (drag) cursor = drag.kind === 'axis' ? 'ns-resize' : 'grabbing';
+    else if (tool === 'pointer' && hover && hover.x < plotR) cursor = overMarker ? 'grab' : 'move';
     else if (overMarker) cursor = 'grab';
     else if (hover && hover.x > plotR + PW) cursor = 'ns-resize';
     else if (snap && tool !== 'pointer') cursor = 'crosshair';
@@ -1182,9 +1216,10 @@ export function Chart(props: Props) {
       draw();
       return;
     }
-    // A finger might be starting a scroll, so touches act on lift-off (see onPointerUp).
+    // Clicks and taps act on release (see onPointerUp); if the pointer moves first, it's a pan.
+    tapRef.current = { x, y };
+    if (!touch) (e.target as Element).setPointerCapture(e.pointerId);
     if (touch) {
-      tapRef.current = { x, y };
       cancelLongPress();
       longPressRef.current = window.setTimeout(() => {
         longPressRef.current = null;
@@ -1194,10 +1229,8 @@ export function Chart(props: Props) {
         navigator.vibrate?.(10);
         draw();
       }, LONG_PRESS_MS);
-      draw();
-      return;
     }
-    act(g, x, y);
+    draw();
   };
 
   /** Click / tap on empty chart: place a leg with the active tool, or clear the selection. */
@@ -1219,9 +1252,24 @@ export function Chart(props: Props) {
     const { x, y } = pos(e);
     hoverRef.current = { x, y };
     const tap = tapRef.current;
-    if (tap && Math.abs(x - tap.x) + Math.abs(y - tap.y) > 10) {
+    const touch = e.pointerType === 'touch';
+    if (tap && Math.abs(x - tap.x) + Math.abs(y - tap.y) > (touch ? 10 : 4)) {
+      // Moved before release: pan the chart instead of placing anything.
       tapRef.current = null;
       cancelLongPress();
+      const p = propsRef.current;
+      const g0 = geomRef.current;
+      if (g0) {
+        dragRef.current = {
+          kind: 'pan',
+          startX: tap.x,
+          startY: tap.y,
+          startFrac: g0.nowX / g0.plotR,
+          startShift: p.view.yShift,
+          moved: true,
+          touch,
+        };
+      }
     }
     const d = dragRef.current;
     const g = geomRef.current;
@@ -1230,7 +1278,14 @@ export function Chart(props: Props) {
         d.moved = true;
         cancelLongPress();
       }
-      if (d.kind === 'axis') {
+      if (d.kind === 'pan') {
+        const p = propsRef.current;
+        lastMoveRef.current = performance.now();
+        const nowFrac = Math.min(0.92, Math.max(0.02, d.startFrac! + (x - d.startX) / g.plotR));
+        // Fingers pan sideways only (up/down scrolls the page); a mouse pans both ways.
+        const yShift = d.touch ? p.view.yShift : d.startShift! + ((y - d.startY) / (g.plotB - g.plotT)) * p.view.yZoom;
+        p.onViewChange({ ...p.view, nowFrac, yShift });
+      } else if (d.kind === 'axis') {
         const p = propsRef.current;
         lastMoveRef.current = performance.now();
         p.onViewChange({ ...p.view, yShift: d.startShift! + ((y - d.startY) / (g.plotB - g.plotT)) * p.view.yZoom });
@@ -1292,10 +1347,10 @@ export function Chart(props: Props) {
   const onDoubleClick = (e: React.MouseEvent) => {
     const g = geomRef.current;
     const r = canvasRef.current!.getBoundingClientRect();
-    if (g && e.clientX - r.left > g.plotR + g.profileW) {
-      const p = propsRef.current;
-      p.onViewChange({ ...p.view, yZoom: 1, yShift: 0 });
-    }
+    if (!g) return;
+    const p = propsRef.current;
+    if (e.clientX - r.left > g.plotR + g.profileW) p.onViewChange({ ...p.view, yZoom: 1, yShift: 0 });
+    else if (p.tool === 'pointer') p.onViewChange({ ...p.view, yZoom: 1, yShift: 0, nowFrac: undefined });
   };
 
   return (
