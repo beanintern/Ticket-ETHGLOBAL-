@@ -459,6 +459,102 @@ export function Chart(props: Props) {
     ctx.textAlign = 'center';
     ctx.fillText('NOW', nowX, plotB + TIME_H / 2);
 
+    // ---- Payoff caps at the first expiry ----
+    // A capped structure (spread, condor) plateaus at max profit / max loss. The heat map alone
+    // just shows a flat colour there, so bracket the plateau and label it.
+    if (legsForPnl.length && maxAbs > 1e-9) {
+      const firstExp = Math.min(...legsForPnl.map((l) => l.expiry));
+      const ex = Math.round(Math.min(tToX(firstExp), plotR - 2));
+      let maxP = -Infinity;
+      let minP = Infinity;
+      for (let i = 0; i <= 600; i++) {
+        const v = pnlFn(spot * Math.exp(Math.log(0.05) + Math.log(400) * (i / 600)), firstExp);
+        maxP = Math.max(maxP, v);
+        minP = Math.min(minP, v);
+      }
+      const tail = pnlFn(spot * 40, firstExp) - pnlFn(spot * 20, firstExp);
+      const unlimitedProfit = tail > 1e-6 * spot;
+      const unlimitedLoss = tail < -1e-6 * spot;
+      const tol = (maxP - minP) * 0.004 + 1e-6;
+      const samples: [number, number][] = [];
+      for (let y = plotT; y <= plotB; y += 2) samples.push([y, pnlFn(yToP(y), firstExp)]);
+      const runs = (pred: (v: number) => boolean) => {
+        const out: [number, number][] = [];
+        let start: number | null = null;
+        for (const [y, v] of samples) {
+          if (pred(v)) start ??= y;
+          else if (start !== null) {
+            out.push([start, y - 2]);
+            start = null;
+          }
+        }
+        if (start !== null) out.push([start, samples[samples.length - 1][0]]);
+        return out;
+      };
+      const strikeLabel = (y: number) => {
+        const p = yToP(y);
+        const k = legsForPnl.reduce((a, l) => (Math.abs(l.strike - p) < Math.abs(a - p) ? l.strike : a), legsForPnl[0].strike);
+        return fmtPrice(Math.abs(k - p) / p < 0.03 ? k : p, 0);
+      };
+      const drawCap = ([y0, y1]: [number, number], v: number, kind: 'profit' | 'loss') => {
+        const rgb = kind === 'profit' ? C.profit : C.loss;
+        const col = `rgb(${rgb.join(',')})`;
+        const atTop = y0 <= plotT + 2;
+        const atBottom = y1 >= plotB - 2;
+        let where: string;
+        if (atTop && atBottom) where = 'across this range';
+        else if (y1 - y0 < 8) where = `at ${strikeLabel((y0 + y1) / 2)}`;
+        else if (atTop) where = `above ${strikeLabel(y1)}`;
+        else if (atBottom) where = `below ${strikeLabel(y0)}`;
+        else where = `${strikeLabel(y1)} – ${strikeLabel(y0)}`;
+
+        // Bracket just right of the expiry line.
+        const bx = ex + 5;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        if (!atTop) ctx.moveTo(bx + 5, y0), ctx.lineTo(bx, y0);
+        else ctx.moveTo(bx, y0);
+        ctx.lineTo(bx, y1);
+        if (!atBottom) ctx.lineTo(bx + 5, y1);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+        // Faint cap line across the heat map at the plateau edge.
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = `rgba(${rgb.join(',')},0.55)`;
+        ctx.beginPath();
+        if (!atTop) ctx.moveTo(nowX, y0 + 0.5), ctx.lineTo(ex, y0 + 0.5);
+        if (!atBottom) ctx.moveTo(nowX, y1 + 0.5), ctx.lineTo(ex, y1 + 0.5);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const title = `${kind === 'profit' ? 'MAX PROFIT' : 'MAX LOSS'} ${signedUsd(v)}`;
+        const sub = kind === 'profit' ? `capped ${where}` : `limited ${where}`;
+        ctx.font = `600 11px ${MONO}`;
+        const tw = ctx.measureText(title).width;
+        ctx.font = `11px ${SANS}`;
+        const w2 = Math.max(tw, ctx.measureText(sub).width) + 18;
+        const right = ex + 14 + w2 < plotR;
+        const lx = right ? ex + 14 : ex - 14 - w2;
+        const ly = Math.max(plotT + 4, Math.min(plotB - 40, (y0 + y1) / 2 - 18));
+        roundRect(ctx, lx, ly, w2, 36, 5);
+        ctx.fillStyle = 'rgba(12,15,20,0.88)';
+        ctx.fill();
+        ctx.strokeStyle = `rgba(${rgb.join(',')},0.5)`;
+        ctx.stroke();
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.font = `600 11px ${MONO}`;
+        ctx.fillStyle = col;
+        ctx.fillText(title, lx + 9, ly + 12);
+        ctx.font = `11px ${SANS}`;
+        ctx.fillStyle = C.muted;
+        ctx.fillText(sub, lx + 9, ly + 26);
+      };
+      if (maxP > tol && !unlimitedProfit) for (const r of runs((v) => v >= maxP - tol)) drawCap(r, maxP, 'profit');
+      if (minP < -tol && !unlimitedLoss) for (const r of runs((v) => v <= minP + tol)) drawCap(r, minP, 'loss');
+    }
+
     // ---- Leg markers ----
     const markers: Marker[] = [];
     const editableIds = new Set(editableLegs.map((l) => l.id));
