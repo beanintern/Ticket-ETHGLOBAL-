@@ -65,8 +65,12 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .stats .label { font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
 .conn { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--short); box-shadow: 0 0 0 3px rgba(240,169,75,0.15); }
-.conn.is-live .conn-dot { background: var(--profit); box-shadow: 0 0 0 3px rgba(46,201,139,0.18); }
-.conn.is-live { color: var(--text); }
+.conn-label { font-size: 12px; }
+.conn-seg button { display: inline-flex; align-items: center; gap: 6px; font-family: var(--sans); font-size: 12px; }
+.conn-seg button:disabled { opacity: 0.4; cursor: not-allowed; }
+.conn-seg .conn-dot { width: 6px; height: 6px; background: var(--dim); box-shadow: none; }
+.conn-seg .is-live .conn-dot { background: var(--profit); box-shadow: 0 0 0 3px rgba(46,201,139,0.18); }
+.conn-seg .is-warn .conn-dot { background: var(--short); box-shadow: 0 0 0 3px rgba(240,169,75,0.15); }
 .loading { height: 100%; min-height: 60vh; display: grid; place-content: center; justify-items: center; gap: 12px; color: var(--muted); padding-inline: 16px; text-align: center; }
 .loading p { margin: 0; }
 .loading-error { color: var(--loss); max-width: 46ch; }
