@@ -265,6 +265,13 @@ export function Chart(props: Props) {
     const { spec, candles, spot, now, expiries, model, editableLegs, staticLegs, tool, selectedLegId, view } = p;
     const g = computeGeom();
     geomRef.current = g;
+    // What this frame drew, for the automated chart check (scripts/check-chart.mjs).
+    const dbg = {
+      zones: [] as { kind: string; v: number; level: number; runs: [number, number][]; t: number; cell: number }[],
+      tags: [] as { dir: string; kind: string }[],
+      rects: [] as [number, number, number, number][],
+      firstExp: 0,
+    };
     const { plotR, plotT, plotB, nowX, tToX, xToT, pToY, yToP } = g;
     const PW = g.profileW;
     const AW = g.axisW;
@@ -403,6 +410,7 @@ export function Chart(props: Props) {
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
             ctx.fillText('SETTLED · AFTER LAST EXPIRY', expR + 8, plotB - 10);
+            dbg.rects.push([expR + 4, plotB - 18, 190, 16]);
           }
         }
         // Break-even as one continuous line: join each crossing to the nearest crossing in the
@@ -587,6 +595,7 @@ export function Chart(props: Props) {
     // just shows a flat colour there, so bracket the plateau and label it.
     if (legsForPnl.length && maxAbs > 1e-9) {
       const firstExp = Math.min(...legsForPnl.map((l) => l.expiry));
+      dbg.firstExp = firstExp;
       const ex = Math.round(Math.min(tToX(firstExp), plotR - 2));
       // With legs on later expiries, max profit/loss is measured at the first expiry (as in the Build
       // panel); captions say so.
@@ -691,6 +700,7 @@ export function Chart(props: Props) {
         }
         // Closing edges: the expiry line, and "now" if you're already in the zone.
         const atExpiry = colRuns(cEx);
+        dbg.zones.push({ kind, v, level, runs: atExpiry, t: xToT(cx(cEx)), cell: hc });
         for (const [a, b] of atExpiry) {
           ctx.moveTo(ex, a);
           ctx.lineTo(ex, b);
@@ -724,6 +734,7 @@ export function Chart(props: Props) {
         const ty = Math.max(plotT + 8, Math.min(plotB - 8, capY));
         ctx.fillStyle = 'rgba(12,15,20,0.72)';
         ctx.fillRect(tx - 4, ty - 8, tw + 8, 16);
+        dbg.rects.push([tx - 4, ty - 8, tw + 8, 16]);
         ctx.fillStyle = col;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
@@ -782,6 +793,7 @@ export function Chart(props: Props) {
         stripes(settled, 0.22);
       };
       const tag = (dir: 'up' | 'down', kind: 'profit' | 'loss', title: string, sub: string) => {
+        dbg.tags.push({ dir, kind });
         const rgb = kind === 'profit' ? C.profit : C.loss;
         const col = `rgb(${rgb.join(',')})`;
         // The zone starts where the payoff turns to this kind past the outermost strike (the
@@ -815,6 +827,7 @@ export function Chart(props: Props) {
         const lx = right ? ex + 14 : Math.max(4, ex - 14 - w2);
         const ly = dir === 'up' ? plotT + 8 : plotB - 44;
         roundRect(ctx, lx, ly, w2, 36, 5);
+        dbg.rects.push([lx, ly, w2, 36]);
         ctx.fillStyle = 'rgba(12,15,20,0.92)';
         ctx.fill();
         ctx.strokeStyle = col;
@@ -1088,6 +1101,26 @@ export function Chart(props: Props) {
     else if (hover && hover.x > plotR + PW) cursor = 'ns-resize';
     else if (snap && tool !== 'pointer') cursor = 'crosshair';
     canvas.style.cursor = cursor;
+
+    const testWin = window as unknown as { __TICKET_TEST__?: boolean; __chart?: unknown };
+    if (testWin.__TICKET_TEST__) {
+      const heat = heatRef.current;
+      testWin.__chart = {
+        ...dbg,
+        spot,
+        now,
+        asset: spec.asset,
+        geom: { nowX, plotR, plotT, plotB, lo: g.lo, hi: g.hi, expR, profileW: g.profileW },
+        tToX,
+        xToT,
+        pToY,
+        yToP,
+        legs: legsForPnl.map((l) => ({ id: l.id, type: l.type, side: l.side, strike: l.strike, expiry: l.expiry, qty: l.qty, entry: l.entry })),
+        markers: markers.map((m) => ({ id: m.id, x: m.x + m.w / 2, y: m.y + m.h / 2 })),
+        heat: heat && maxAbs > 1e-9 ? { x0: heat.x0, cell: heat.cell, cols: heat.cols, rows: heat.rows, contour: heat.contour } : null,
+        draw,
+      };
+    }
     } finally {
       // Always unwind, so a frame that fails part-way can't leave a clip behind and blank the next.
       ctx.restore();

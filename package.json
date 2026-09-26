@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "build:artifact": "vite build --mode artifact && node scripts/to-artifact.mjs",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:chart": "vite build && node scripts/check-chart.mjs"
   },
   "dependencies": {
     "react": "^19.3.0",
@@ -18,6 +19,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "playwright": "^1.56.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.1",
     "vite-plugin-singlefile": "^2.3.3"

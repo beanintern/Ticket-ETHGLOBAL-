@@ -336,6 +336,24 @@ export default function App() {
     setToast(`Closed (paper): ${pos.name}`);
   };
 
+  // Test hook for scripts/check-chart.mjs; only present when a test sets window.__TICKET_TEST__.
+  useEffect(() => {
+    const w = window as unknown as { __TICKET_TEST__?: boolean; __ticket?: unknown };
+    if (!w.__TICKET_TEST__) return;
+    w.__ticket = {
+      setLegs: (a: Asset, legs: Omit<Leg, 'id' | 'asset'>[]) => {
+        setAsset(a);
+        setFocus({ kind: 'builder' });
+        setIncludePortfolio(false);
+        setBuilder((b) => ({ ...b, [a]: legs.map((l) => ({ ...l, id: newId(), asset: a })) }));
+      },
+      setView: (v: ChartView) => setView(v),
+      spot: (a: Asset) => feeds[a].spot,
+      specs: MARKETS,
+      expiries: () => listExpiries(Date.now()).map((e) => e.ts),
+    };
+  }, [feeds]);
+
   const dayAgo = priceAt(feed.candles, now - DAY);
   const change = (spot / dayAgo - 1) * 100;
   const atmIv = impliedVol(spec, spot, spot, 30 / 365);
