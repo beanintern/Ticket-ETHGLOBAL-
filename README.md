@@ -85,6 +85,10 @@ NETWORK=testnet npm run check:live
   profit, greeks and an editable leg list. Presets for common structures.
 - **Positions tab**. Paper fills with live P&L, a P&L sparkline since entry, progress toward
   max profit, and close. Stored per data source in the browser.
+- **Compounding positions**. Tick positions in the Positions tab to add them to the chart
+  together, on top of whatever is on the Build tab, so you can see a new trade against what you
+  already hold. A Combined box shows their joint P&L, delta and max profit/loss. The toolbar's
+  "Include open positions" switch ticks or unticks all of them.
 - **Pricing** (`src/lib/bs.ts`, `src/lib/strategy.ts`). Black-Scholes on the index price. With
   live data, each option's IV is the one that reproduces Derive's mark, so today's P&L matches
   exchange prices and the map projects forward from there.

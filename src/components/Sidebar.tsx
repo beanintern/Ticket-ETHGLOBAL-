@@ -36,6 +36,9 @@ interface Props {
   trading: Trading | null;
   onPlaced: (results: OrderResult[]) => void;
   positions: Position[];
+  /** Ids of positions ticked to compound on the chart. */
+  compound: Set<string>;
+  onToggleCompound: (id: string) => void;
   /** The connected Derive account (testnet), or null when accounts aren't available. */
   exchange: {
     account: AccountState | null;
@@ -372,7 +375,11 @@ function PositionCard({
   onFocus,
   onClose,
   closeLabel,
+  ticked,
+  onTick,
 }: {
+  ticked: boolean;
+  onTick: () => void;
   pos: Position;
   now: number;
   markets: Props['markets'];
@@ -404,9 +411,13 @@ function PositionCard({
   const captured = summary && !summary.unlimitedProfit && summary.maxProfit > 0 ? Math.max(0, Math.min(1, pnl / summary.maxProfit)) : null;
 
   return (
-    <li className={`pos ${focused ? 'is-focused' : ''}`}>
+    <li className={`pos ${focused ? 'is-focused' : ''} ${ticked ? 'is-ticked' : ''}`}>
       <div className="pos-head">
-        <div>
+        <label className="tick" title="Tick to combine this position with others on the chart">
+          <input type="checkbox" checked={ticked} onChange={onTick} aria-label={`Combine ${pos.name} on the chart`} />
+          <span aria-hidden="true" />
+        </label>
+        <div className="pos-title">
           <div className="eyebrow">
             {pos.asset} · opened {daysLeft(now, pos.openedAt)} ago at {fmtPrice(pos.openSpot, spec.priceDecimals)}
           </div>
@@ -462,7 +473,15 @@ function PositionCard({
   );
 }
 
-function ExchangeSection({ exchange, now, markets, focus, onFocus }: Pick<Props, 'now' | 'markets' | 'focus' | 'onFocus'> & { exchange: NonNullable<Props['exchange']> }) {
+function ExchangeSection({
+  exchange,
+  now,
+  markets,
+  focus,
+  onFocus,
+  compound,
+  onToggleCompound,
+}: Pick<Props, 'now' | 'markets' | 'focus' | 'onFocus' | 'compound' | 'onToggleCompound'> & { exchange: NonNullable<Props['exchange']> }) {
   const { account, positions } = exchange;
   const p = account?.portfolio;
   return (
@@ -495,6 +514,8 @@ function ExchangeSection({ exchange, now, markets, focus, onFocus }: Pick<Props,
                   onFocus={() => onFocus(pos.id)}
                   onClose={() => exchange.onClose(pos)}
                   closeLabel="Close at market"
+                  ticked={compound.has(pos.id)}
+                  onTick={() => onToggleCompound(pos.id)}
                 />
               ))}
             </ul>
@@ -535,7 +556,52 @@ function ExchangeSection({ exchange, now, markets, focus, onFocus }: Pick<Props,
   );
 }
 
-function Positions({ positions, exchange, closed, now, markets, focus, onFocus, onClosePosition }: Props) {
+/** Combined numbers for the ticked positions, per underlying (legs on different underlyings don't net). */
+function Combined({ picked, now, markets, onClear }: { picked: Position[]; now: number; markets: Props['markets']; onClear: () => void }) {
+  const assets = [...new Set(picked.map((p) => p.asset))];
+  return (
+    <section className="combined">
+      <div className="section-head">
+        <div className="eyebrow">
+          Combined · {picked.length} position{picked.length > 1 ? 's' : ''}
+        </div>
+        <button className="link" onClick={onClear}>
+          Untick all
+        </button>
+      </div>
+      {assets.map((asset) => {
+        const market = markets[asset];
+        const legs = picked.filter((p) => p.asset === asset).flatMap((p) => p.legs);
+        const model = buildModel(legs, market, now);
+        const sum = summarize(model, market, now);
+        const pnl = model.value - model.cost;
+        return (
+          <dl key={asset} className="summary">
+            <div>
+              <dt>{assets.length > 1 ? `${asset} P&L` : 'P&L now'}</dt>
+              <dd className={`num ${pnlClass(pnl)}`}>{signedUsd(pnl)}</dd>
+            </div>
+            <div>
+              <dt>Delta</dt>
+              <dd className="num">{sum ? signedUsd(sum.greeks.delta * market.spot, 0) : '–'}</dd>
+            </div>
+            <div>
+              <dt>Max profit</dt>
+              <dd className="num up">{!sum ? '–' : sum.unlimitedProfit ? 'Uncapped' : usd(sum.maxProfit)}</dd>
+            </div>
+            <div>
+              <dt>Max loss</dt>
+              <dd className="num down">{!sum ? '–' : sum.unlimitedLoss ? 'Uncapped' : usd(Math.abs(sum.maxLoss))}</dd>
+            </div>
+          </dl>
+        );
+      })}
+      <p className="fine">Ticked positions are drawn together on the chart{assets.length > 1 ? ' (per market)' : ''}, plus anything on the Build tab.</p>
+    </section>
+  );
+}
+
+function Positions({ positions, exchange, closed, now, markets, focus, onFocus, onClosePosition, compound, onToggleCompound }: Props) {
   let open = 0;
   let deltaUsd = 0;
   for (const p of positions) {
@@ -547,6 +613,7 @@ function Positions({ positions, exchange, closed, now, markets, focus, onFocus, 
     if (sum) deltaUsd += sum.greeks.delta * s;
   }
   const realized = closed.reduce((a, c) => a + c.realized, 0);
+  const picked = [...(exchange?.positions ?? []), ...positions].filter((p) => compound.has(p.id));
 
   return (
     <div className="panel-body">
@@ -564,7 +631,10 @@ function Positions({ positions, exchange, closed, now, markets, focus, onFocus, 
           <dd className="num">{signedUsd(deltaUsd, 0)}</dd>
         </div>
       </dl>
-      {exchange && <ExchangeSection exchange={exchange} now={now} markets={markets} focus={focus} onFocus={onFocus} />}
+      {picked.length > 0 && <Combined picked={picked} now={now} markets={markets} onClear={() => picked.forEach((p) => onToggleCompound(p.id))} />}
+      {exchange && (
+        <ExchangeSection exchange={exchange} now={now} markets={markets} focus={focus} onFocus={onFocus} compound={compound} onToggleCompound={onToggleCompound} />
+      )}
       {exchange && <div className="eyebrow">Paper</div>}
       {positions.length === 0 ? (
         <div className="empty">
@@ -581,6 +651,8 @@ function Positions({ positions, exchange, closed, now, markets, focus, onFocus, 
               focused={focus.kind === 'position' && focus.id === p.id}
               onFocus={() => onFocus(p.id)}
               onClose={() => onClosePosition(p.id)}
+              ticked={compound.has(p.id)}
+              onTick={() => onToggleCompound(p.id)}
             />
           ))}
         </ul>

@@ -210,7 +210,9 @@ export default function App() {
   const [closed, setClosed] = useState<ClosedPosition[]>(() => loadStore(source.kind)?.closed ?? []);
   const [focus, setFocus] = useState<Focus>({ kind: 'builder' });
   const [tab, setTab] = useState<'build' | 'positions'>('build');
-  const [includePortfolio, setIncludePortfolio] = useState(false);
+  // Positions ticked in the Positions tab: their legs are added to the chart's P&L map (with the
+  // ticket being built), so their exposure compounds.
+  const [compound, setCompound] = useState<Set<string>>(() => new Set());
   const [selectedLegId, setSelectedLegId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -313,7 +315,26 @@ export default function App() {
   }, [now, asset, builderLegs]);
 
   const editableLegs = focusedPosition ? [] : builderLegs;
-  const staticLegs = focusedPosition ? focusedPosition.legs : includePortfolio ? assetPositions.flatMap((p) => p.legs) : [];
+  const compounded = assetPositions.filter((p) => compound.has(p.id));
+  const staticLegs = focusedPosition ? focusedPosition.legs : compounded.flatMap((p) => p.legs);
+  const toggleCompound = (id: string) => {
+    setCompound((c) => {
+      const next = new Set(c);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+    // Ticking is about the combined view, so leave the single-position view.
+    if (focus.kind === 'position') setFocus({ kind: 'builder' });
+  };
+  const setCompoundAll = (on: boolean) =>
+    setCompound((c) => {
+      const next = new Set(c);
+      for (const p of assetPositions) {
+        if (on) next.add(p.id);
+        else next.delete(p.id);
+      }
+      return next;
+    });
   const chartLegs = [...staticLegs, ...editableLegs];
   const chartModel = buildModel(chartLegs, market, now);
   const builderModel = buildModel(builderLegs, market, now);
@@ -498,7 +519,7 @@ export default function App() {
       setLegs: (a: Asset, legs: Omit<Leg, 'id' | 'asset'>[]) => {
         setAsset(a);
         setFocus({ kind: 'builder' });
-        setIncludePortfolio(false);
+        setCompound(new Set());
         setBuilder((b) => ({ ...b, [a]: legs.map((l) => ({ ...l, id: newId(), asset: a })) }));
       },
       setView: (v: ChartView) => setView(v),
@@ -635,9 +656,18 @@ export default function App() {
                 </button>
               ) : (
                 <label className="switch">
-                  <input id="include-portfolio" type="checkbox" checked={includePortfolio} onChange={(e) => setIncludePortfolio(e.target.checked)} />
+                  <input
+                    id="include-portfolio"
+                    type="checkbox"
+                    checked={compounded.length > 0}
+                    disabled={!assetPositions.length}
+                    onChange={(e) => setCompoundAll(e.target.checked)}
+                  />
                   <span className="switch-track" aria-hidden="true" />
-                  <span className="wide-only">Include open positions</span>
+                  <span className="wide-only">
+                    Include open positions
+                    {compounded.length > 0 && compounded.length < assetPositions.length ? ` (${compounded.length}/${assetPositions.length})` : ''}
+                  </span>
                   <span className="narrow-only">Positions</span>
                 </label>
               )}
@@ -728,6 +758,8 @@ export default function App() {
           trading={trading}
           onPlaced={onPlaced}
           positions={positions}
+          compound={compound}
+          onToggleCompound={toggleCompound}
           exchange={
             accountEnabled
               ? {
