@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { DeriveAccount, loadCredentials, type AccountState, type Credentials, type Portfolio } from './account/derive';
+import { AccountButton, AccountPanel } from './components/AccountPanel';
 import { Chart, TOOL_LEG, type ChartView, type Tool } from './components/Chart';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
@@ -118,6 +120,28 @@ function loadStore(kind: MarketSource['kind']): { positions: Position[]; closed:
   }
 }
 
+ /** YYYYMMDD (UTC) of a timestamp, as in Derive instrument names. */
+const ymd = (ts: number) => new Date(ts).toISOString().slice(0, 10).replace(/-/g, '');
+
+/** The exchange account's option positions as one position per underlying, so they chart like paper ones. */
+function exchangePositions(portfolio: Portfolio | null, markets: Record<Asset, Market>): Position[] {
+  if (!portfolio) return [];
+  return (Object.keys(MARKETS) as Asset[]).flatMap((asset) => {
+    const held = portfolio.positions.filter((p) => p.asset === asset);
+    if (!held.length) return [];
+    const market = markets[asset];
+    const legs: Leg[] = held.map((p) => {
+      const listed = market.expiries.find((e) => ymd(e.ts) === p.expiryYmd);
+      // Derive options expire at 08:00 UTC.
+      const y = p.expiryYmd;
+      const expiry = listed?.ts ?? Date.UTC(+y.slice(0, 4), +y.slice(4, 6) - 1, +y.slice(6, 8), 8);
+      return { id: `derive-${p.instrument}`, asset, type: p.type, side: p.amount > 0 ? 1 : -1, strike: p.strike, expiry, qty: Math.abs(p.amount), entry: p.averagePrice };
+    });
+    const openedAt = Math.min(...held.map((p) => p.openedAt));
+    return [{ id: `derive-${asset}`, asset, name: describe(legs), legs, openedAt, openSpot: priceAt(market.candles, openedAt) || market.spot }];
+  });
+}
+
 export type Focus = { kind: 'builder' } | { kind: 'position'; id: string };
 
 /** Derive mainnet, Derive testnet, or the simulator. Switching reloads the page with ?source=…. */
@@ -187,6 +211,40 @@ export default function App() {
   const [selectedLegId, setSelectedLegId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
+  // Derive account (testnet only): connected with a session key that stays in this browser.
+  const accountEnabled = source.kind === 'testnet';
+  const [account, setAccount] = useState<DeriveAccount | null>(null);
+  const [accountState, setAccountState] = useState<AccountState | null>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [savedCreds] = useState(() => (accountEnabled ? loadCredentials() : null));
+  const connectAccount = useCallback(async (creds: Credentials, remember: boolean) => {
+    const acct = await DeriveAccount.connect(creds, remember);
+    setAccount((prev) => {
+      void prev?.disconnect();
+      return acct;
+    });
+  }, []);
+  useEffect(() => {
+    if (!account) {
+      setAccountState(null);
+      return;
+    }
+    setAccountState(account.state);
+    return account.subscribe(() => setAccountState(account.state));
+  }, [account]);
+  // Reconnect with the key saved earlier in this tab (or on this device, if remembered).
+  const reconnected = useRef(false);
+  useEffect(() => {
+    if (!savedCreds || reconnected.current) return;
+    reconnected.current = true;
+    connectAccount(savedCreds.creds, savedCreds.remember).catch((e) => setToast(`Couldn't reconnect to Derive: ${(e as Error).message}`));
+  }, [savedCreds, connectAccount]);
+  const disconnectAccount = () => {
+    void account?.disconnect();
+    setAccount(null);
+    setAccountOpen(false);
+  };
+
   // Re-render whenever the market data changes.
   useEffect(() => source.subscribe(() => setNow(Date.now())), [source]);
 
@@ -221,8 +279,10 @@ export default function App() {
   const spot = market.spot;
   const expiries = market.expiries;
   const builderLegs = builder[asset];
-  const assetPositions = positions.filter((p) => p.asset === asset);
-  const focusedPosition = focus.kind === 'position' ? positions.find((p) => p.id === focus.id) : undefined;
+  const onExchange = exchangePositions(accountState?.portfolio ?? null, markets);
+  const allPositions = [...onExchange, ...positions];
+  const assetPositions = allPositions.filter((p) => p.asset === asset);
+  const focusedPosition = focus.kind === 'position' ? allPositions.find((p) => p.id === focus.id) : undefined;
 
   // Drop expired builder legs as time passes.
   useEffect(() => {
@@ -443,7 +503,18 @@ export default function App() {
           </div>
         </div>
         <SourceSwitch source={source} />
+        {accountEnabled && <AccountButton account={accountState} onOpen={() => setAccountOpen(true)} />}
       </header>
+      {accountOpen && (
+        <AccountPanel
+          account={accountState}
+          initial={savedCreds}
+          onConnect={connectAccount}
+          onDisconnect={disconnectAccount}
+          onSelectSubaccount={(id) => account?.selectSubaccount(id)}
+          onClose={() => setAccountOpen(false)}
+        />
+      )}
 
       <main className="workspace">
         <section className="chart-panel" aria-label="Chart">
@@ -580,10 +651,11 @@ export default function App() {
           }}
           onPlace={placeOrder}
           positions={positions}
+          exchange={accountEnabled ? { account: accountState, positions: onExchange, onConnect: () => setAccountOpen(true) } : null}
           closed={closed}
           focus={focus}
           onFocus={(id) => {
-            const p = positions.find((x) => x.id === id);
+            const p = allPositions.find((x) => x.id === id);
             if (p && p.asset !== asset) setAsset(p.asset);
             setFocus(focus.kind === 'position' && focus.id === id ? { kind: 'builder' } : { kind: 'position', id });
           }}

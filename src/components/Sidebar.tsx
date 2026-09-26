@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { Focus, Preset } from '../App';
 import { compactUsd, price as fmtPrice, signed, signedUsd, usd } from '../lib/format';
+import type { AccountState } from '../account/derive';
 import type { Market } from '../data/types';
 import { expiryLabel, type Asset, type MarketSpec } from '../lib/market';
 import {
@@ -31,6 +32,8 @@ interface Props {
   onPreset: (p: Preset) => void;
   onPlace: () => void;
   positions: Position[];
+  /** The connected Derive account (testnet), or null when accounts aren't available. */
+  exchange: { account: AccountState | null; positions: Position[]; onConnect: () => void } | null;
   closed: ClosedPosition[];
   focus: Focus;
   onFocus: (id: string) => void;
@@ -49,7 +52,7 @@ const PRESETS: [Preset, string][] = [
 const pnlClass = (v: number) => (v > 0.005 ? 'up' : v < -0.005 ? 'down' : '');
 
 export function Sidebar(props: Props) {
-  const { tab, onTab, positions } = props;
+  const { tab, onTab, positions, exchange } = props;
   return (
     <aside className="sidebar" aria-label="Position">
       <div className="tabs" role="tablist">
@@ -57,7 +60,7 @@ export function Sidebar(props: Props) {
           Build
         </button>
         <button role="tab" aria-selected={tab === 'positions'} className={tab === 'positions' ? 'is-active' : ''} onClick={() => onTab('positions')}>
-          Positions <span className="count">{positions.length}</span>
+          Positions <span className="count">{positions.length + (exchange?.positions.length ?? 0)}</span>
         </button>
       </div>
       {tab === 'build' ? <Builder {...props} /> : <Positions {...props} />}
@@ -312,7 +315,22 @@ function Sparkline({ values }: { values: number[] }) {
   );
 }
 
-function PositionCard({ pos, now, markets, focused, onFocus, onClose }: { pos: Position; now: number; markets: Props['markets']; focused: boolean; onFocus: () => void; onClose: () => void }) {
+function PositionCard({
+  pos,
+  now,
+  markets,
+  focused,
+  onFocus,
+  onClose,
+}: {
+  pos: Position;
+  now: number;
+  markets: Props['markets'];
+  focused: boolean;
+  onFocus: () => void;
+  /** Absent for exchange positions, which are closed with orders. */
+  onClose?: () => void;
+}) {
   const [confirming, setConfirming] = useState(false);
   const market = markets[pos.asset];
   const spec = market.spec;
@@ -375,7 +393,7 @@ function PositionCard({ pos, now, markets, focused, onFocus, onClose }: { pos: P
         <button className={focused ? 'ghost is-on' : 'ghost'} onClick={onFocus}>
           {focused ? 'Showing on chart' : 'Show on chart'}
         </button>
-        {confirming ? (
+        {!onClose ? null : confirming ? (
           <>
             <button className="ghost" onClick={() => setConfirming(false)}>
               Keep
@@ -394,7 +412,75 @@ function PositionCard({ pos, now, markets, focused, onFocus, onClose }: { pos: P
   );
 }
 
-function Positions({ positions, closed, now, markets, focus, onFocus, onClosePosition }: Props) {
+function ExchangeSection({ exchange, now, markets, focus, onFocus }: Pick<Props, 'now' | 'markets' | 'focus' | 'onFocus'> & { exchange: NonNullable<Props['exchange']> }) {
+  const { account, positions } = exchange;
+  const p = account?.portfolio;
+  return (
+    <section className="exchange">
+      <div className="section-head">
+        <div className="eyebrow">On Derive testnet{account?.subaccountId != null ? ` · #${account.subaccountId}` : ''}</div>
+        {p && <span className="num muted">{usd(p.value)}</span>}
+      </div>
+      {!account ? (
+        <div className="empty">
+          <p>Connect your Derive testnet account to see its positions here.</p>
+          <button className="ghost" onClick={exchange.onConnect}>
+            Connect account
+          </button>
+        </div>
+      ) : !p ? (
+        <p className="fine">{account.subaccountId === null ? 'No subaccount yet: deposit test USDC to create one.' : (account.error ?? 'Loading…')}</p>
+      ) : (
+        <>
+          {positions.length === 0 && p.otherPositions.length === 0 && <p className="fine">No positions on Derive yet.</p>}
+          {positions.length > 0 && (
+            <ul className="positions">
+              {positions.map((pos) => (
+                <PositionCard
+                  key={pos.id}
+                  pos={pos}
+                  now={now}
+                  markets={markets}
+                  focused={focus.kind === 'position' && focus.id === pos.id}
+                  onFocus={() => onFocus(pos.id)}
+                />
+              ))}
+            </ul>
+          )}
+          {p.otherPositions.length > 0 && (
+            <ul className="acct-list">
+              {p.otherPositions.map((o) => (
+                <li key={o.instrument}>
+                  <span>{o.instrument}</span>
+                  <span className="num">{o.amount}</span>
+                  <span className={`num ${pnlClass(o.unrealizedPnl)}`}>{signedUsd(o.unrealizedPnl)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {p.openOrders.length > 0 && (
+            <div>
+              <div className="eyebrow">Open orders</div>
+              <ul className="acct-list">
+                {p.openOrders.map((o) => (
+                  <li key={o.id}>
+                    <span className={o.direction === 'buy' ? 'long' : 'short'}>{o.direction === 'buy' ? 'Buy' : 'Sell'}</span>
+                    <span>{o.instrument}</span>
+                    <span className="num">
+                      {o.filled}/{o.amount} @ {usd(o.limitPrice)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function Positions({ positions, exchange, closed, now, markets, focus, onFocus, onClosePosition }: Props) {
   let open = 0;
   let deltaUsd = 0;
   for (const p of positions) {
@@ -423,6 +509,8 @@ function Positions({ positions, closed, now, markets, focus, onFocus, onClosePos
           <dd className="num">{signedUsd(deltaUsd, 0)}</dd>
         </div>
       </dl>
+      {exchange && <ExchangeSection exchange={exchange} now={now} markets={markets} focus={focus} onFocus={onFocus} />}
+      {exchange && <div className="eyebrow">Paper</div>}
       {positions.length === 0 ? (
         <div className="empty">
           <p>No open positions. Build one on the chart and place a paper order to track it here.</p>
@@ -457,7 +545,9 @@ function Positions({ positions, closed, now, markets, focus, onFocus, onClosePos
           </ul>
         </div>
       )}
-      <p className="fine">Example positions are simulated. Nothing here is a real trade.</p>
+      <p className="fine">
+        {exchange ? 'Paper positions are simulated fills at mark; Derive positions are real (test funds).' : 'Example positions are simulated. Nothing here is a real trade.'}
+      </p>
     </div>
   );
 }

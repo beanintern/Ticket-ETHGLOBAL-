@@ -14,6 +14,8 @@
     "check:live": "node scripts/check-live.mjs"
   },
   "dependencies": {
+    "@derivexyz/derive-ts": "^3.0.25",
+    "ethers": "^6.17.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

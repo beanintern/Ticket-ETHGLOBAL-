@@ -90,13 +90,27 @@ Keys: `1`–`4` pick Buy Call / Sell Call / Buy Put / Sell Put, `V` or `Esc` for
 `Delete` removes the selected leg, `Ctrl/⌘ Z` undo. Scroll zooms time; shift-scroll or drag the
 price axis for price; drag the chart to pan; double-click to reset.
 
+## Derive account (testnet)
+
+In **Testnet** mode, **Connect** in the header links a Derive testnet account
+(`src/account/derive.ts`, using Derive's TypeScript SDK, loaded only when you connect):
+
+- Enter the wallet address that owns the account and a **session key** registered to it. The app
+  refuses the wallet's own key. The session key signs the WebSocket login (and, later, orders)
+  in the browser; it's kept in sessionStorage, or localStorage if you tick "remember", and
+  **Disconnect** forgets it.
+- The account panel shows the subaccount, value, margin, collateral and whether the key's scopes
+  allow trading. The Positions tab lists the subaccount's option positions (drawn on the chart
+  like paper positions), other instruments and open orders, refreshed every 5 s.
+- Test funds: Sepolia ETH from a faucet, then **Mint** test USDC and deposit at
+  [testnet.app.derive.xyz/developers](https://testnet.app.derive.xyz/developers).
+
 ## Next: trading on Derive
 
 | Now | Next |
 | --- | --- |
 | paper fill at mark | signed order (or RFQ for multi-leg) with the builder code attached |
 | positions in localStorage | account positions and fills for the subaccount |
-| no account | wallet connection and a Derive session key |
 
 Builder code details (how it's attached to orders, fee settings) still need confirming against
 Derive's docs before that step.
