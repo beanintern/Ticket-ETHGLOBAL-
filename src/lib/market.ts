@@ -77,12 +77,16 @@ export function snapStrike(spec: MarketSpec, price: number, expiry: number, now:
   return Math.max(step, Math.round(price / step) * step);
 }
 
-/** Toy vol surface: mild smile with a put skew and a slightly lower front end. */
+/**
+ * Toy vol surface: mild smile with a put skew and a slightly lower front end. Moneyness is
+ * measured against at least a week of time and capped, so short-dated far wings stay in a
+ * believable range (roughly up to 1.6x ATM vol) instead of exploding.
+ */
 export function impliedVol(spec: MarketSpec, spot: number, strike: number, T: number): number {
   const t = Math.max(T, 1 / (365 * 24));
-  const m = Math.max(-3, Math.min(3, Math.log(strike / spot) / Math.sqrt(Math.max(t, 2 / 365))));
+  const m = Math.max(-2.5, Math.min(2.5, Math.log(strike / spot) / Math.sqrt(Math.max(t, 7 / 365))));
   const term = 0.93 + 0.07 * Math.min(1, t * 6);
-  return spec.baseIv * term * (1 + 0.32 * m * m - 0.07 * m);
+  return spec.baseIv * term * (1 + 0.12 * m * m - 0.04 * m);
 }
 
 export interface Candle {
