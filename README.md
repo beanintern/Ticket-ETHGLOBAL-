@@ -3,7 +3,7 @@
 An options trading UI that feels like trading perps. The chart is the ticket: click a future
 expiry at a price to place a leg, and the P&L map shows where the position makes and loses money.
 
-Market data can be **live from Derive** or **simulated (demo)**. Orders are paper trades in
+Market data can be **live from Derive** (mainnet or testnet) or **simulated (demo)**. Orders are paper trades in
 both modes; nothing is signed or sent to Derive yet.
 
 ## Run it
@@ -31,10 +31,10 @@ required.
 
 To test the production build locally: `npm run build && npm start` (http://localhost:3000).
 
-### Market data: Live vs Demo
+### Market data: Live, Testnet, Demo
 
-Switch with the **Live / Demo** control in the header, or `?source=live` / `?source=mock` in the
-URL, or `VITE_SOURCE=live|mock` at build time. The default is live, except the single-file
+Switch with the **Live / Testnet / Demo** control in the header, or `?source=live|testnet|mock`
+in the URL, or `VITE_SOURCE=live|testnet|mock` at build time. The default is live, except the single-file
 preview build, which can't open network connections and always uses demo data.
 
 - **Live** (`src/data/derive.ts`): Derive's public API over `wss://api.lyra.finance/ws`.
@@ -42,6 +42,10 @@ preview build, which can't open network connections and always uses demo data.
   history (`public/get_spot_feed_history`), and each option's mark, bid, ask and IV
   (`public/get_tickers`, refreshed every 10 s). Read-only: no account or keys. Everything goes
   over the WebSocket because Derive's REST endpoints don't send CORS headers for other origins.
+- **Testnet** (same file, `DERIVE_TESTNET`): Derive's v3 testnet on Sepolia,
+  `wss://testnet.api.derive.xyz/v3/ws`. Same data, with the v3 method names
+  (`public/get_all_instruments`, and OHLC candles from `public/get_index_chart_data`). The
+  testnet index follows the real one; its history only goes back a few months.
 - **Demo** (`src/data/mock.ts`): generated price history, a random-walk index and a toy
   volatility smile. The automated chart check runs against this.
 
@@ -54,6 +58,7 @@ to that interface.
 npm run check:chart   # random positions vs an independent Black-Scholes calculation (demo data)
 N=200 SEED=7 npm run check:chart
 npm run check:live    # the live Derive layer against the real exchange
+NETWORK=testnet npm run check:live
 ```
 
 - `check:chart` places random positions and verifies, pixel by pixel, that leg dots, the P&L

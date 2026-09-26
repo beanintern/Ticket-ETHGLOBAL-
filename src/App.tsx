@@ -120,36 +120,43 @@ function loadStore(kind: MarketSource['kind']): { positions: Position[]; closed:
 
 export type Focus = { kind: 'builder' } | { kind: 'position'; id: string };
 
-/** Live Derive data vs the simulator. Switching reloads the page with ?source=…. */
+/** Derive mainnet, Derive testnet, or the simulator. Switching reloads the page with ?source=…. */
 function SourceSwitch({ source }: { source: MarketSource }) {
   // The single-file preview can't open network connections, so it only has demo data.
-  const liveAvailable = import.meta.env.MODE !== 'artifact';
+  const networkAvailable = import.meta.env.MODE !== 'artifact';
   const go = (kind: MarketSource['kind']) => {
     if (kind === source.kind) return;
     const u = new URL(location.href);
     u.searchParams.set('source', kind);
     location.href = u.toString();
   };
-  const liveState = source.kind !== 'live' ? '' : source.error ? 'is-warn' : 'is-live';
+  const networkButton = (kind: 'live' | 'testnet', label: string, about: string) => {
+    const active = source.kind === kind;
+    const state = !active ? '' : source.error ? 'is-warn' : 'is-live';
+    return (
+      <button
+        className={active ? `is-active ${state}` : ''}
+        onClick={() => go(kind)}
+        disabled={!networkAvailable}
+        title={
+          !networkAvailable
+            ? 'Derive data needs the app running on your machine (npm run dev); this preview only has demo data.'
+            : active
+              ? (source.error ?? about)
+              : `Switch to ${about.charAt(0).toLowerCase()}${about.slice(1)}`
+        }
+      >
+        <span className="conn-dot" aria-hidden="true" />
+        {active && source.error ? 'Reconnecting' : label}
+      </button>
+    );
+  };
   return (
     <div className="conn" role="group" aria-label="Market data">
       <span className="wide-only conn-label">Derive</span>
       <div className="seg conn-seg">
-        <button
-          className={source.kind === 'live' ? `is-active ${liveState}` : ''}
-          onClick={() => go('live')}
-          disabled={!liveAvailable}
-          title={
-            !liveAvailable
-              ? 'Live Derive data needs the app running on your machine (npm run dev); this preview only has demo data.'
-              : source.kind === 'live'
-                ? (source.error ?? 'Live market data from Derive. Orders are still paper trades.')
-                : 'Switch to live Derive market data'
-          }
-        >
-          <span className="conn-dot" aria-hidden="true" />
-          {source.kind === 'live' && source.error ? 'Reconnecting' : 'Live'}
-        </button>
+        {networkButton('live', 'Live', 'Live market data from Derive mainnet. Orders are paper trades.')}
+        {networkButton('testnet', 'Testnet', "Market data from Derive's testnet (Sepolia), with test funds.")}
         <button className={source.kind === 'mock' ? 'is-active' : ''} onClick={() => go('mock')} title="Simulated prices. Nothing is sent to Derive.">
           Demo
         </button>

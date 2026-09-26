@@ -1,5 +1,6 @@
 // Checks the live Derive data layer (src/data/derive.ts) against the real exchange.
-//   npm run check:live
+//   npm run check:live                  (mainnet)
+//   NETWORK=testnet npm run check:live  (v3 testnet on Sepolia)
 // Runs the same code the app uses, under Node, and verifies:
 //   - listed expiries/strikes load and look sane
 //   - the index price and hourly price history are present and consistent
@@ -10,12 +11,16 @@ import { createServer } from 'vite';
 import { bsPriceForCheck } from './bs-for-check.mjs';
 
 const vite = await createServer({ server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
-const { createDeriveSource } = await vite.ssrLoadModule('/src/data/derive.ts');
+const { createDeriveSource, DERIVE_MAINNET, DERIVE_TESTNET } = await vite.ssrLoadModule('/src/data/derive.ts');
+const testnet = process.env.NETWORK === 'testnet';
+// The testnet only has a few months of index history.
+const MIN_HISTORY_DAYS = testnet ? 90 : 300;
 const YEAR = 365 * 864e5;
 const failures = [];
 const fail = (m) => failures.push(m);
 
-const src = createDeriveSource();
+const src = createDeriveSource(testnet ? DERIVE_TESTNET : DERIVE_MAINNET);
+console.log(`Network: ${testnet ? 'testnet (v3, Sepolia)' : 'mainnet'}`);
 const t0 = Date.now();
 await new Promise((resolve, reject) => {
   const off = src.subscribe(() => {
@@ -34,7 +39,7 @@ for (const asset of ['ETH', 'BTC']) {
   if (!(m.spot > 0)) fail(`${asset}: no index price`);
   if (m.candles.length < 300) fail(`${asset}: only ${m.candles.length} candles`);
   const spanDays = (m.candles.at(-1).t - m.candles[0].t) / 864e5;
-  if (spanDays < 300) fail(`${asset}: history only covers ${spanDays.toFixed(0)} days`);
+  if (spanDays < MIN_HISTORY_DAYS) fail(`${asset}: history only covers ${spanDays.toFixed(0)} days`);
   const lastExp = m.expiries.at(-1);
   if (lastExp && lastExp.ts - now < 180 * 864e5) fail(`${asset}: longest expiry ${lastExp.label} is under 6 months out`);
   const last = m.candles.at(-1);

@@ -31,7 +31,8 @@ export interface Market {
   quote(type: OptType, strike: number, expiry: number): Quote | null;
 }
 
-export type SourceKind = 'mock' | 'live';
+/** Demo data, Derive mainnet, or Derive's v3 testnet (Sepolia). */
+export type SourceKind = 'mock' | 'live' | 'testnet';
 
 export interface MarketSource {
   kind: SourceKind;
