@@ -595,7 +595,8 @@ export function Chart(props: Props) {
       let minP = Infinity;
       // Sample a wide price range plus every strike exactly: payoffs have sharp corners at the
       // strikes, and a grid alone can step over a peak or trough (the Build panel checks strikes too).
-      const probe = [...legsForPnl.map((l) => l.strike)];
+      // (and a price near zero, where puts reach their extremes, as the Build panel does)
+      const probe = [...legsForPnl.map((l) => l.strike), spot * 1e-4];
       for (let i = 0; i <= 600; i++) probe.push(spot * Math.exp(Math.log(0.05) + Math.log(400) * (i / 600)));
       for (const S of probe) {
         const v = pnlFn(S, firstExp);
@@ -853,7 +854,7 @@ export function Chart(props: Props) {
     const staticIds = new Set(staticLegs.map((l) => l.id));
     ctx.font = `600 11px ${MONO}`;
     ctx.textBaseline = 'middle';
-    const drawLeg = (l: Leg, ghost = false) => {
+    const drawLeg = (l: Leg, ghost = false, part: 'line' | 'dot' | 'both' = 'both') => {
       const isStatic = staticIds.has(l.id) && !editableIds.has(l.id);
       const dimmed = isStatic && editableLegs.length > 0;
       const x = Math.min(tToX(l.expiry), plotR - 2);
@@ -861,13 +862,19 @@ export function Chart(props: Props) {
       if (y < plotT - 4 || y > plotB + 4) return;
       const col = l.side > 0 ? C.long : C.short;
       ctx.globalAlpha = ghost ? 0.85 : dimmed ? 0.5 : 1;
-      ctx.strokeStyle = col;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(nowX, y);
-      ctx.lineTo(x, y);
-      ctx.stroke();
-      ctx.setLineDash([]);
+      if (part !== 'dot') {
+        ctx.strokeStyle = col;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(nowX, y);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      if (part === 'line') {
+        ctx.globalAlpha = 1;
+        return;
+      }
       const r = l.id === selectedLegId ? 6.5 : 5.5;
       ctx.beginPath();
       ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -885,10 +892,13 @@ export function Chart(props: Props) {
         markers.push({ id: l.id, x: x - 10, y: y - 10, w: 20, h: 20, label, color: col });
       }
     };
-    for (const l of staticLegs) if (!editableIds.has(l.id)) drawLeg(l);
-    for (const l of editableLegs) {
-      if (override && l.id === override.id) drawLeg({ ...l, strike: override.strike, expiry: override.expiry }, !!dragLeg);
-      else drawLeg(l);
+    // Two passes, so no leg's strike line is ever drawn over another leg's dot.
+    for (const part of ['line', 'dot'] as const) {
+      for (const l of staticLegs) if (!editableIds.has(l.id)) drawLeg(l, false, part);
+      for (const l of editableLegs) {
+        if (override && l.id === override.id) drawLeg({ ...l, strike: override.strike, expiry: override.expiry }, !!dragLeg, part);
+        else drawLeg(l, false, part);
+      }
     }
     markersRef.current = markers;
 
