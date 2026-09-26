@@ -184,7 +184,17 @@ export function Chart(props: Props) {
   const geomRef = useRef<Geom | null>(null);
   const lastMoveRef = useRef(0);
   const zoomRef = useRef<{ horizon: number; yZoom: number; raf: number; cur: ChartView; sent: ChartView[] } | null>(null);
-  const heatRef = useRef<{ key: string; canvas: HTMLCanvasElement; maxAbs: number; contour: number[][]; x0: number } | null>(null);
+  const heatRef = useRef<{
+    key: string;
+    canvas: HTMLCanvasElement;
+    maxAbs: number;
+    contour: number[][];
+    x0: number;
+    vals: Float32Array;
+    cols: number;
+    rows: number;
+    cell: number;
+  } | null>(null);
 
   const computeGeom = useCallback((): Geom => {
     const { w, h } = sizeRef.current;
@@ -339,11 +349,9 @@ export function Chart(props: Props) {
         const img = octx.createImageData(cols, rows);
         const contour: number[][] = [];
         if (mx > 1e-9) {
-          const settledFrom = Math.floor((expR - hx0) / cell);
           for (let i = 0; i < vals.length; i++) {
             const v = vals[i];
-            const fade = i % cols > settledFrom ? 0.4 : 1;
-            const a = Math.pow(Math.abs(v) / mx, 0.75) * fade;
+            const a = Math.pow(Math.abs(v) / mx, 0.75);
             const rgb = v >= 0 ? C.profit : C.loss;
             img.data[i * 4] = rgb[0];
             img.data[i * 4 + 1] = rgb[1];
@@ -362,7 +370,7 @@ export function Chart(props: Props) {
           }
         }
         octx.putImageData(img, 0, 0);
-        heatRef.current = { key, canvas: off, maxAbs: mx, contour, x0: hx0 };
+        heatRef.current = { key, canvas: off, maxAbs: mx, contour, x0: hx0, vals, cols, rows, cell };
       }
       const heat = heatRef.current;
       maxAbs = heat.maxAbs;
@@ -373,6 +381,18 @@ export function Chart(props: Props) {
         ctx.clip();
         ctx.imageSmoothingEnabled = true;
         ctx.drawImage(heat.canvas, hx0, plotT, cols * cell, rows * cell);
+        // After the last expiry everything has settled: dim it with a crisp edge and say so.
+        if (expR < plotR - 1) {
+          ctx.fillStyle = 'rgba(12,15,20,0.62)';
+          ctx.fillRect(expR, plotT, plotR - expR, plotB - plotT);
+          if (plotR - expR > 90) {
+            ctx.font = `600 9px ${MONO}`;
+            ctx.fillStyle = C.dim;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('SETTLED · AFTER LAST EXPIRY', expR + 8, plotB - 10);
+          }
+        }
         // Break-even as one continuous line: join each crossing to the nearest crossing in the
         // next column (a line can't jump more than a few cells between neighbouring columns).
         ctx.strokeStyle = 'rgba(227,231,238,0.6)';
@@ -668,22 +688,42 @@ export function Chart(props: Props) {
       const downLoss = lowTail < -1e-6 * spot;
       const downProfit = lowTail > 1e-6 * spot;
       const atZero = pnlFn(spot * 1e-4, firstExp);
-      const hatch = (y0: number, y1: number) => {
-        if (y1 - y0 < 2) return;
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(nowX, y0, ex - nowX, y1 - y0);
-        ctx.clip();
-        ctx.strokeStyle = `rgba(${C.loss.join(',')},0.5)`;
-        ctx.lineWidth = 1.25;
-        ctx.beginPath();
-        const hgt = y1 - y0;
-        for (let k = -hgt; k < ex - nowX; k += 9) {
-          ctx.moveTo(nowX + k, y1);
-          ctx.lineTo(nowX + k + hgt, y0);
+      // Hatch the open-ended loss zone exactly where it is on the map: in each column, the run of
+      // losing cells that touches the top (upside tail) or bottom (downside tail) edge.
+      const hatchTail = (dir: 'up' | 'down') => {
+        const heat = heatRef.current;
+        if (!heat) return;
+        const { vals, cols, rows, cell: hc, x0 } = heat;
+        const live = new Path2D();
+        const settled = new Path2D();
+        for (let c = 0; c < cols; c++) {
+          let n = 0;
+          if (dir === 'up') while (n < rows && vals[n * cols + c] < 0) n++;
+          else while (n < rows && vals[(rows - 1 - n) * cols + c] < 0) n++;
+          if (!n) continue;
+          const x = x0 + c * hc;
+          const y = dir === 'up' ? plotT : plotT + (rows - n) * hc;
+          (x + hc / 2 > expR ? settled : live).rect(x, y, hc, n * hc);
         }
-        ctx.stroke();
-        ctx.restore();
+        const stripes = (clip: Path2D, alpha: number) => {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(hx0, plotT, plotR - hx0, plotB - plotT);
+          ctx.clip();
+          ctx.clip(clip);
+          ctx.strokeStyle = `rgba(${C.loss.join(',')},${alpha})`;
+          ctx.lineWidth = 1.25;
+          ctx.beginPath();
+          const hgt = plotB - plotT;
+          for (let k = -hgt; k < plotR - hx0; k += 9) {
+            ctx.moveTo(hx0 + k, plotB);
+            ctx.lineTo(hx0 + k + hgt, plotT);
+          }
+          ctx.stroke();
+          ctx.restore();
+        };
+        stripes(live, 0.5);
+        stripes(settled, 0.22);
       };
       const tag = (dir: 'up' | 'down', kind: 'profit' | 'loss', title: string, sub: string) => {
         const rgb = kind === 'profit' ? C.profit : C.loss;
@@ -710,20 +750,7 @@ export function Chart(props: Props) {
           }
           prev = S;
         }
-        const edgeY = pToY(edgeP);
-        const y0 = dir === 'up' ? plotT : Math.max(plotT, edgeY);
-        const y1 = dir === 'up' ? Math.min(plotB, edgeY) : plotB;
-        if (kind === 'loss') hatch(y0, y1);
-        // Solid edge where the open-ended zone starts, if it's on screen.
-        if (edgeY > plotT && edgeY < plotB) {
-          ctx.strokeStyle = `rgba(${rgb.join(',')},0.8)`;
-          ctx.lineWidth = 1.5;
-          ctx.beginPath();
-          ctx.moveTo(nowX, Math.round(edgeY) + 0.5);
-          ctx.lineTo(ex, Math.round(edgeY) + 0.5);
-          ctx.stroke();
-          ctx.lineWidth = 1;
-        }
+        if (kind === 'loss') hatchTail(dir);
         ctx.font = `600 11px ${MONO}`;
         const tw = ctx.measureText(title).width;
         ctx.font = `11px ${SANS}`;
