@@ -103,6 +103,10 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .acct-form .check span { color: var(--muted); font-size: 12px; }
 .acct-form .primary:disabled { opacity: 0.6; cursor: progress; }
 .fine a { color: var(--long); }
+.primary.mm { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.primary.mm:disabled { opacity: 0.75; cursor: progress; }
+.steps { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
+.acct-form > .link { justify-self: center; }
 .form-error { margin: 0; color: var(--loss); font-size: 12px; }
 .kv { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; margin: 0; }
 .kv dt { font-size: 11px; color: var(--muted); }

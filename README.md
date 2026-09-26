@@ -95,18 +95,30 @@ price axis for price; drag the chart to pan; double-click to reset.
 
 ## Derive account (testnet)
 
-In **Testnet** mode, **Connect** in the header links a Derive testnet account
-(`src/account/derive.ts`, using Derive's TypeScript SDK, loaded only when you connect):
+In **Testnet** mode, **Connect** in the header opens the account panel (`src/account/`, using
+Derive's TypeScript SDK, loaded only when you connect).
 
-- Enter the wallet address that owns the account and a **session key** registered to it. The app
-  refuses the wallet's own key. The session key signs the WebSocket login and orders in the
-  browser; it's kept in sessionStorage, or localStorage if you tick "remember", and
-  **Disconnect** forgets it.
-- The account panel shows the subaccount, value, margin, collateral and whether the key's scopes
-  allow trading. The Positions tab lists the subaccount's option positions (drawn on the chart
-  like paper positions), other instruments and open orders, refreshed every 5 s.
-- Test funds: Sepolia ETH from a faucet, then **Mint** test USDC and deposit at
-  [testnet.app.derive.xyz/developers](https://testnet.app.derive.xyz/developers).
+**Connect MetaMask** (`src/account/metamask.ts`):
+
+1. MetaMask shares the address and switches to Sepolia, the chain Derive's testnet signs for.
+2. The wallet signs a Derive login (EIP-191 over a timestamp; no transaction, no gas).
+3. The app generates a session key in the browser, and the wallet authorises it with one EIP-712
+   signature (`private/set_session_key`). The key is scoped to `trade:orderbook:all` and
+   `trade:rfq:all` (it can't withdraw) and expires after 7 days. Before asking MetaMask to sign,
+   the app checks that its typed data hashes to exactly the digest Derive verifies.
+
+From then on the session key signs logins and orders without popups. It's saved in this browser
+per wallet and reused on the next connect until it's within an hour of expiry. **Disconnect**
+forgets it. The wallet's own key never leaves MetaMask. A wallet needs a Derive testnet account
+first: get Sepolia ETH from a faucet, then **Mint** test USDC and deposit at
+[testnet.app.derive.xyz/developers](https://testnet.app.derive.xyz/developers).
+
+**Use an existing session key instead**: paste the wallet address and a session key you
+registered elsewhere. The app refuses the wallet's own key.
+
+Once connected, the panel shows the subaccount, value, margin, collateral and whether the key can
+trade. The Positions tab lists the subaccount's option positions (drawn on the chart like paper
+positions), other instruments and open orders, refreshed every 5 s.
 
 ### Placing orders
 

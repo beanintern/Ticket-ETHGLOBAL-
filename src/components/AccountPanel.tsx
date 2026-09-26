@@ -27,17 +27,36 @@ interface Props {
   account: AccountState | null;
   initial: { creds: Credentials; remember: boolean } | null;
   onConnect: (creds: Credentials, remember: boolean) => Promise<void>;
+  /** Connect with MetaMask; reports progress through onStep. */
+  onMetaMask: (onStep: (s: string) => void) => Promise<void>;
+  metaMaskAvailable: boolean;
   onDisconnect: () => void;
   onSelectSubaccount: (id: number) => void;
   onClose: () => void;
 }
 
-export function AccountPanel({ account, initial, onConnect, onDisconnect, onSelectSubaccount, onClose }: Props) {
+export function AccountPanel({ account, initial, onConnect, onMetaMask, metaMaskAvailable, onDisconnect, onSelectSubaccount, onClose }: Props) {
+  const [manual, setManual] = useState(false);
+  const [step, setStep] = useState<string | null>(null);
   const [owner, setOwner] = useState(initial?.creds.owner ?? '');
   const [sessionKey, setSessionKey] = useState('');
   const [remember, setRemember] = useState(initial?.remember ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const metaMask = async () => {
+    setBusy(true);
+    setError(null);
+    setStep('Connecting to MetaMask…');
+    try {
+      await onMetaMask(setStep);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+      setStep(null);
+    }
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,7 +85,33 @@ export function AccountPanel({ account, initial, onConnect, onDisconnect, onSele
           </button>
         </div>
 
-        {!account ? (
+        {!account && !manual ? (
+          <div className="acct-form">
+            <button className="primary mm" onClick={metaMask} disabled={busy}>
+              <MetaMaskIcon />
+              {busy ? (step ?? 'Connecting…') : metaMaskAvailable ? 'Connect MetaMask' : 'Connect MetaMask (not installed)'}
+            </button>
+            {error && <p className="form-error">{error}</p>}
+            <ol className="steps">
+              <li>MetaMask shares your address and switches to Sepolia.</li>
+              <li>You sign in to Derive (a signature, no transaction, no gas).</li>
+              <li>
+                You authorise a trading key this app creates in your browser. It can place and cancel orders but can’t withdraw, and it expires in 7 days.
+                After that, trades need no popups.
+              </li>
+            </ol>
+            <p className="fine">
+              Your wallet’s key never leaves MetaMask. No Derive account yet? Get Sepolia ETH from a faucet, then Mint test USDC and deposit at{' '}
+              <a href="https://testnet.app.derive.xyz/developers" target="_blank" rel="noreferrer">
+                testnet.app.derive.xyz
+              </a>
+              .
+            </p>
+            <button className="link" onClick={() => setManual(true)}>
+              Use an existing session key instead
+            </button>
+          </div>
+        ) : !account ? (
           <form className="acct-form" onSubmit={submit}>
             <label>
               <span>Wallet address</span>
@@ -93,6 +138,9 @@ export function AccountPanel({ account, initial, onConnect, onDisconnect, onSele
             {error && <p className="form-error">{error}</p>}
             <button className="primary" disabled={busy}>
               {busy ? 'Connecting…' : 'Connect'}
+            </button>
+            <button type="button" className="link" onClick={() => setManual(false)}>
+              Back to MetaMask
             </button>
             <p className="fine">
               The key stays in this browser: it signs the login and your orders here and is never sent anywhere. Test funds: Sepolia ETH from a faucet,
@@ -212,5 +260,18 @@ function AccountDetails({ account, onDisconnect, onSelectSubaccount }: { account
         Disconnect and forget key
       </button>
     </div>
+  );
+}
+
+function MetaMaskIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M21.3 2.5 13.2 8.5l1.5-3.5z" fill="#e2761b" />
+      <path d="m2.7 2.5 8 6.1-1.4-3.6zM18.4 16.4l-2.2 3.3 4.6 1.3 1.3-4.5zM1.9 16.5l1.3 4.5 4.6-1.3-2.1-3.3z" fill="#e4761b" />
+      <path d="m7.5 10.8-1.3 1.9 4.6.2-.2-4.9zM16.5 10.8l-3.2-2.9-.1 5 4.6-.2zM7.8 19.7l2.8-1.3-2.4-1.9zM13.4 18.4l2.8 1.3-.4-3.2z" fill="#e4761b" />
+      <path d="m16.2 19.7-2.8-1.3.2 1.8v.8zM7.8 19.7l2.6 1.3v-.8l.2-1.8z" fill="#d7c1b3" />
+      <path d="m10.4 15.3-2.3-.7 1.6-.7zM13.6 15.3l.7-1.4 1.6.7z" fill="#233447" />
+      <path d="m7.8 19.7.4-3.3-2.5.1zM15.8 16.4l.4 3.3 2.2-3.2zM17.7 12.7l-4.6.2.4 2.4.7-1.4 1.6.7zM8.1 14.6l1.6-.7.7 1.4.4-2.4-4.6-.2z" fill="#cd6116" />
+    </svg>
   );
 }

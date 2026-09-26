@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DeriveAccount, loadCredentials, type AccountState, type Credentials, type OrderResult, type Portfolio } from './account/derive';
+import { forgetSessionKey, hasMetaMask, metaMaskSigner, registerSessionKey, savedSessionKey } from './account/metamask';
 import { instrumentName, legOrders, type OrderMode } from './account/orders';
 import type { Trading } from './components/DeriveReview';
 import { AccountButton, AccountPanel } from './components/AccountPanel';
@@ -241,7 +242,25 @@ export default function App() {
     reconnected.current = true;
     connectAccount(savedCreds.creds, savedCreds.remember).catch((e) => setToast(`Couldn't reconnect to Derive: ${(e as Error).message}`));
   }, [savedCreds, connectAccount]);
+  // MetaMask: reuse this browser's trading key for the wallet if it's still valid, else register one.
+  const connectMetaMask = async (onStep: (s: string) => void) => {
+    const owner = await metaMaskSigner();
+    const saved = savedSessionKey(owner.address);
+    if (saved) {
+      try {
+        onStep('Reconnecting with your trading key…');
+        await connectAccount({ owner: owner.address, sessionKey: saved }, true);
+        return;
+      } catch {
+        forgetSessionKey(owner.address);
+      }
+    }
+    const creds = await registerSessionKey(owner, onStep);
+    onStep('Loading your account…');
+    await connectAccount(creds, true);
+  };
   const disconnectAccount = () => {
+    if (account) forgetSessionKey(account.state.owner);
     void account?.disconnect();
     setAccount(null);
     setAccountOpen(false);
@@ -564,6 +583,8 @@ export default function App() {
           account={accountState}
           initial={savedCreds}
           onConnect={connectAccount}
+          onMetaMask={connectMetaMask}
+          metaMaskAvailable={hasMetaMask()}
           onDisconnect={disconnectAccount}
           onSelectSubaccount={(id) => account?.selectSubaccount(id)}
           onClose={() => setAccountOpen(false)}
