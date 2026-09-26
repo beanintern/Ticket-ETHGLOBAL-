@@ -643,52 +643,65 @@ export function Chart(props: Props) {
         else if (atBottom) where = `below ${strikeLabel(y0)}`;
         else where = `${strikeLabel(y1)} – ${strikeLabel(y0)}`;
 
-        // Bracket just right of the expiry line.
-        const bx = ex + 5;
-        ctx.strokeStyle = col;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        if (!atTop) ctx.moveTo(bx + 5, y0), ctx.lineTo(bx, y0);
-        else ctx.moveTo(bx, y0);
-        ctx.lineTo(bx, y1);
-        if (!atBottom) ctx.lineTo(bx + 5, y1);
-        ctx.stroke();
-        ctx.lineWidth = 1;
-        // Faint cap line across the heat map at the plateau edge.
-        ctx.setLineDash([6, 4]);
-        ctx.strokeStyle = `rgba(${rgb.join(',')},0.55)`;
-        ctx.beginPath();
-        if (!atTop) ctx.moveTo(nowX, y0 + 0.5), ctx.lineTo(ex, y0 + 0.5);
-        if (!atBottom) ctx.moveTo(nowX, y1 + 0.5), ctx.lineTo(ex, y1 + 0.5);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        if (!withLabel) return;
+        const point = y1 - y0 < 8;
         const title = `${kind === 'profit' ? 'MAX PROFIT' : 'MAX LOSS'} ${signedUsd(v)}`;
-        const point = where.startsWith('at ');
-        const sub = kind === 'profit' ? `${point ? 'best' : 'capped'} ${where}` : `${point ? 'worst' : 'limited'} ${where}`;
-        ctx.font = `600 11px ${MONO}`;
-        const tw = ctx.measureText(title).width;
-        ctx.font = `11px ${SANS}`;
-        const w2 = Math.max(tw, ctx.measureText(sub).width) + 18;
-        const right = ex + 14 + w2 < plotR;
-        const lx = right ? ex + 14 : Math.max(4, ex - 14 - w2);
-        const ly = Math.max(plotT + 4, Math.min(plotB - 40, (y0 + y1) / 2 - 18));
-        roundRect(ctx, lx, ly, w2, 36, 5);
-        ctx.fillStyle = 'rgba(12,15,20,0.88)';
-        ctx.fill();
-        ctx.strokeStyle = `rgba(${rgb.join(',')},0.5)`;
-        ctx.stroke();
+        const caption = `${title} · ${where}`;
+        ctx.strokeStyle = `rgba(${rgb.join(',')},0.95)`;
+        ctx.lineWidth = 1.5;
+        ctx.lineJoin = 'round';
+        let capY: number;
+        if (point) {
+          // A single-price extreme: ring the point at expiry and run a thin line back to now.
+          const y = Math.round((y0 + y1) / 2) + 0.5;
+          ctx.beginPath();
+          ctx.arc(ex, y, 8, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.strokeStyle = `rgba(${rgb.join(',')},0.45)`;
+          ctx.beginPath();
+          ctx.moveTo(nowX, y);
+          ctx.lineTo(ex - 8, y);
+          ctx.stroke();
+          capY = y - 14;
+        } else {
+          // Outline the zone from now to expiry. An edge that runs off the chart stays open, since
+          // the zone carries on past it.
+          const L = Math.round(nowX) + 0.5;
+          const R = Math.round(ex) + 0.5;
+          const T = Math.round(y0) + 0.5;
+          const B = Math.round(y1) + 0.5;
+          ctx.beginPath();
+          if (atTop) ctx.moveTo(L, T);
+          else {
+            ctx.moveTo(L, T);
+            ctx.lineTo(R, T);
+          }
+          ctx.moveTo(R, T);
+          ctx.lineTo(R, B);
+          if (!atBottom) ctx.lineTo(L, B);
+          ctx.moveTo(L, B);
+          ctx.lineTo(L, T);
+          ctx.stroke();
+          // Caption inside the closed edge (the one next to the rest of the payoff).
+          if (!atTop) capY = y1 - y0 >= 22 ? y0 + 12 : y0 - 10;
+          else if (!atBottom) capY = y1 - 10;
+          else capY = y0 + 12;
+        }
+        ctx.lineWidth = 1;
+        if (!withLabel) return;
+        ctx.font = `600 10.5px ${MONO}`;
+        const cw = ctx.measureText(caption).width;
+        const text = cw < ex - nowX - 16 ? caption : title;
+        const tw = ctx.measureText(text).width;
+        const tx = Math.max(nowX + 6, ex - 8 - tw);
+        const ty = Math.max(plotT + 8, Math.min(plotB - 8, capY));
+        ctx.fillStyle = 'rgba(12,15,20,0.72)';
+        ctx.fillRect(tx - 4, ty - 8, tw + 8, 16);
+        ctx.fillStyle = col;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        ctx.font = `600 11px ${MONO}`;
-        ctx.fillStyle = col;
-        ctx.fillText(title, lx + 9, ly + 12);
-        ctx.font = `11px ${SANS}`;
-        ctx.fillStyle = C.muted;
-        ctx.fillText(sub, lx + 9, ly + 26);
+        ctx.fillText(text, tx, ty + 0.5);
       };
-      // Bracket every plateau, but label only the one nearest spot so repeated peaks don't stack labels.
+      // Outline every plateau, but caption only the one nearest spot so repeated peaks don't stack text.
       const nearest = (rs: [number, number][]) =>
         rs.reduce((a, r) => (Math.abs((r[0] + r[1]) / 2 - spotY) < Math.abs((a[0] + a[1]) / 2 - spotY) ? r : a), rs[0]);
       if (maxP > tol && !unlimitedProfit) {
