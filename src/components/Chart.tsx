@@ -11,7 +11,7 @@ import {
   type MarketSpec,
 } from '../lib/market';
 import type { Market } from '../data/types';
-import { betQuestion, fmtMultiplier, multiplier, type BetQuote } from '../lib/binary';
+import { betQuestion, fmtCents, fmtChance, type BetQuote } from '../lib/binary';
 import type { PathPoint } from '../lib/pathfit';
 import { buildModel, lifetimeExtremes, type Leg, type Model, type Side } from '../lib/strategy';
 
@@ -1362,11 +1362,12 @@ export function Chart(props: Props) {
     // ---- Easy mode: a grid of bets ----
     // Columns run from one listed expiry to the next; rows are bands between listed strikes on
     // that expiry (merged until tall enough to tap), so boxes differ in size. Each box is one bet:
-    // above the index, "ends above this band"; below it, "ends below". It shows its multiplier.
+    // above the index, "ends above this band"; below it, "ends below". It shows its share price.
     let easyInfo: { q: BetQuote; box: EasyBox } | null = null;
     if (p.easy) {
       const easy = p.easy;
-      const key = [spot.toFixed(2), Math.floor(now / 15000), w, h, g.lo.toFixed(3), g.hi.toFixed(3), view.horizon, nowX.toFixed(1), expiries.map((e) => e.ts).join(',')].join('#');
+      // `now` moves on every market update, so box prices follow new option marks, never stale ones.
+      const key = [spot.toFixed(2), now, w, h, g.lo.toFixed(3), g.hi.toFixed(3), view.horizon, nowX.toFixed(1), expiries.map((e) => e.ts).join(',')].join('#');
       if (!easyGridRef.current || easyGridRef.current.key !== key) {
         const boxes: EasyBox[] = [];
         let lastX = nowX;
@@ -1407,12 +1408,18 @@ export function Chart(props: Props) {
         const y0 = pToY(b.hi) + 1.5;
         const y1 = pToY(b.lo) - 1.5;
         if (y1 < plotT || y0 > plotB || x1 - x0 < 6 || y1 - y0 < 4) continue;
-        const rgb = rgbOf(b.q.dir).join(',');
-        const m = multiplier(b.q.price);
-        // Longer odds glow brighter, like the numbers on a betting board.
-        const heat = Math.min(1, Math.log(m) / Math.log(40));
         const sel = isPending(b);
         const hov = hit === b;
+        if (b.q.unavailable) {
+          // Can't be bet on (too unlikely, too certain, or nobody quoting a leg): a faint empty box.
+          roundRect(ctx, x0, y0, x1 - x0, y1 - y0, 4);
+          ctx.strokeStyle = hov ? 'rgba(227,231,238,0.3)' : 'rgba(227,231,238,0.07)';
+          ctx.stroke();
+          continue;
+        }
+        const rgb = rgbOf(b.q.dir).join(',');
+        // Longer odds (cheaper shares) glow brighter, like the numbers on a betting board.
+        const heat = Math.min(1, Math.log(1 / b.q.price) / Math.log(40));
         roundRect(ctx, x0, y0, x1 - x0, y1 - y0, 4);
         ctx.fillStyle = sel ? `rgba(${rgb},0.55)` : hov ? `rgba(${rgb},0.28)` : `rgba(${rgb},${0.03 + 0.07 * heat})`;
         ctx.fill();
@@ -1423,7 +1430,7 @@ export function Chart(props: Props) {
         if (y1 - y0 >= 12 && x1 - x0 >= 30) {
           ctx.font = `${sel || hov ? 700 : 600} ${y1 - y0 >= 18 ? 10.5 : 9.5}px ${MONO}`;
           ctx.fillStyle = sel ? '#0c0f14' : hov ? C.text : `rgba(${rgb},${0.45 + 0.55 * heat})`;
-          ctx.fillText(fmtMultiplier(m), (x0 + x1) / 2, (y0 + y1) / 2 + 0.5);
+          ctx.fillText(fmtCents(b.q.price), (x0 + x1) / 2, (y0 + y1) / 2 + 0.5);
         }
       }
       // Placed bets: an outline on their box, with the price paid and now.
@@ -1568,10 +1575,12 @@ export function Chart(props: Props) {
         if (easyInfo) {
           const { q } = easyInfo;
           const col = q.dir === 'above' ? `rgb(${C.profit.join(',')})` : `rgb(${C.loss.join(',')})`;
-          const m = multiplier(q.price);
-          lines.push({ text: `${betQuestion(spec.asset, q.dir, q.level)} on ${fmtTime(q.expiry, false)}`, bold: true, color: col });
-          lines.push({ text: `${fmtMultiplier(m)} · $1 wins $${m.toFixed(2)} · ${Math.round(q.price * 100)}% chance`, bold: true });
-          lines.push({ text: 'Click to bet', color: C.muted });
+          lines.push({ text: `${betQuestion(spec.asset, q.dir, q.level)} on ${fmtTime(q.expiry, false)}`, bold: true, color: q.unavailable ? C.muted : col });
+          if (q.unavailable) lines.push({ text: q.unavailable, color: C.muted });
+          else {
+            lines.push({ text: `${fmtCents(q.price)} a share · pays $1 · ${fmtChance(q.price)} chance`, bold: true });
+            lines.push({ text: 'Click to bet', color: C.muted });
+          }
         }
         if (!easyInfo) lines.push({ text: `${fmtTime(ht, true)} UTC · ${fmtPrice(hp, hp < 100 ? 2 : 0)}`, color: C.muted });
         if (legsForPnl.length) {
@@ -1617,7 +1626,7 @@ export function Chart(props: Props) {
     else if (overMarker) cursor = 'grab';
     else if (hover && hover.x > plotR + PW) cursor = 'ns-resize';
     else if (snap && isLegTool(tool)) cursor = 'crosshair';
-    else if (easyInfo) cursor = 'pointer';
+    else if (easyInfo && !easyInfo.q.unavailable) cursor = 'pointer';
     else if (tool === 'draw' && hover && hover.x > nowX && hover.x < plotR) cursor = 'crosshair';
     canvas.style.cursor = cursor;
 
@@ -1638,7 +1647,7 @@ export function Chart(props: Props) {
         markers: markers.map((m) => ({ id: m.id, x: m.x + m.w / 2, y: m.y + m.h / 2 })),
         guide: p.guide,
         easyHover: easyInfo ? { ...easyInfo.q } : null,
-        easyBoxes: p.easy ? (easyGridRef.current?.boxes ?? []).map((b) => ({ expiry: b.expiry, lo: b.lo, hi: b.hi, x0: b.x0, x1: b.x1, y0: g.pToY(b.hi), y1: g.pToY(b.lo), price: b.q.price, dir: b.q.dir })) : null,
+        easyBoxes: p.easy ? (easyGridRef.current?.boxes ?? []).map((b) => ({ expiry: b.expiry, lo: b.lo, hi: b.hi, x0: b.x0, x1: b.x1, y0: g.pToY(b.hi), y1: g.pToY(b.lo), price: b.q.price, dir: b.q.dir, unavailable: b.q.unavailable })) : null,
         heat: heat && maxAbs > 1e-9 ? { x0: heat.x0, cell: heat.cell, cols: heat.cols, rows: heat.rows, contour: heat.contour } : null,
         pnl: pnlFn,
         draw,
@@ -1913,7 +1922,7 @@ export function Chart(props: Props) {
     const p = propsRef.current;
     if (p.easy) {
       const b = easyGridRef.current?.boxes.find((bx) => x > bx.x0 && x <= bx.x1 && y <= g.pToY(bx.lo) && y > g.pToY(bx.hi));
-      if (b) p.easy.onPick(b.expiry, b.lo, b.hi);
+      if (b && !b.q.unavailable) p.easy.onPick(b.expiry, b.lo, b.hi);
       return;
     }
     if (!isLegTool(p.tool)) {

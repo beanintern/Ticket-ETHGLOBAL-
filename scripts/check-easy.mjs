@@ -6,11 +6,14 @@
 // For several assets and zooms it checks the grid, then bets on boxes above and below the price:
 //   1. the grid: boxes never overlap, each column ends exactly on its listed expiry, and every
 //      box edge is a strike listed for that expiry
-//   2. every box: "above" if its band is above the index, "below" if below, and its price (shown
-//      as a multiplier, 1 / price) equals an independent Black-Scholes value of the spread per $1
-//   3. betting on a box: the card shows its multiplier, "Show underlying positions" lists the
-//      two options (right expiry, strikes and sides), buying $X costs $X, and the shares' legs pay
-//      exactly $1 past the far strike, $0 on the losing side and 50¢ at the middle
+//   2. every box: "above" if its band is above the index, "below" if below, and its share price
+//      equals an independent Black-Scholes value of the spread per $1, exactly (never rounded up);
+//      boxes under 1¢ or over 99¢ are marked unavailable and clicking them does nothing
+//   3. betting on a box: the card shows its share price, "Show underlying positions" lists the
+//      two options (right expiry, strikes and sides), a bet under the minimum can't be placed,
+//      buying $X costs at most $X including Derive's fees (sizes on Derive's 0.01-contract grid,
+//      at least 0.1), and the shares' legs pay exactly $1 past the far strike, $0 on the losing
+//      side and 50¢ at the middle
 //   4. the bet is listed, and selling it removes it
 import { chromium } from 'playwright';
 import { preview } from 'vite';
@@ -50,7 +53,7 @@ const PRICER = `(() => {
     const v = b.dir === 'above'
       ? (bs('C', spot, b.lo, T, ivOf(b.lo, T)) - bs('C', spot, b.hi, T, ivOf(b.hi, T))) / w
       : (bs('P', spot, b.hi, T, ivOf(b.hi, T)) - bs('P', spot, b.lo, T, ivOf(b.lo, T))) / w;
-    return Math.min(0.99, Math.max(0.01, v));
+    return Math.min(1, Math.max(0, v));
   };
 })()`;
 
@@ -88,7 +91,9 @@ for (const [asset, horizon, colFrac, chance, stake] of cases) {
       const wantDir = (b.lo + b.hi) / 2 >= K.spot ? 'above' : 'below';
       if (b.dir !== wantDir) out.push(`box ${b.lo}/${b.hi} is "${b.dir}", its middle is ${wantDir} the index`);
       const want = price(asset, K.spot, K.now, b);
-      if (Math.abs(b.price - want) > 0.002) out.push(`box ${b.lo}/${b.hi} ${new Date(b.expiry).toISOString().slice(5, 10)}: ${(1 / b.price).toFixed(2)}x, independent ${(1 / want).toFixed(2)}x`);
+      if (Math.abs(b.price - want) > Math.max(0.0005, want * 0.01)) out.push(`box ${b.lo}/${b.hi} ${new Date(b.expiry).toISOString().slice(5, 10)}: ${(b.price * 100).toFixed(2)}¢, independent ${(want * 100).toFixed(2)}¢`);
+      const off = want < 0.01 || want > 0.99;
+      if (off !== !!b.unavailable) out.push(`box ${b.lo}/${b.hi} at ${(want * 100).toFixed(2)}¢ is ${b.unavailable ? '' : 'not '}marked unavailable`);
       for (let j = i + 1; j < boxes.length; j++) {
         const c = boxes[j];
         const xo = Math.min(b.x1, c.x1) - Math.max(b.x0, c.x0);
@@ -102,17 +107,33 @@ for (const [asset, horizon, colFrac, chance, stake] of cases) {
   const cols = [...new Set(grid.boxes.map((b) => b.expiry))].sort((a, b) => a - b);
   const col = cols[Math.min(cols.length - 1, Math.round(colFrac * (cols.length - 1)))];
   const inCol = grid.boxes.filter((b) => b.expiry === col && b.y0 > 130 && b.y1 < 800);
+  // An unavailable box can't be picked.
+  const dead = grid.boxes.find((b) => b.unavailable && b.y0 > 130 && b.y1 < 800 && b.y1 - b.y0 > 8 && b.x1 - b.x0 > 8);
+  if (dead) {
+    if (await page.$('.bet-card .ghost[aria-label="Cancel"]')) await page.click('.bet-card .ghost[aria-label="Cancel"]');
+    await page.mouse.click(canvas.x + (dead.x0 + dead.x1) / 2, canvas.y + (dead.y0 + dead.y1) / 2);
+    await page.waitForTimeout(100);
+    if (await page.$('.bet-card')) fail(`clicking an unavailable box (${dead.unavailable}) opened a bet`);
+  }
   for (const dir of ['above', 'below']) {
-    const pick = inCol.filter((b) => b.dir === dir).sort((a, b) => Math.abs(a.price - chance) - Math.abs(b.price - chance))[0];
+    const pick = inCol.filter((b) => b.dir === dir && !b.unavailable).sort((a, b) => Math.abs(a.price - chance) - Math.abs(b.price - chance))[0];
     if (!pick) { fail(`no ${dir} box in the column`); continue; }
     await page.mouse.click(canvas.x + (pick.x0 + pick.x1) / 2, canvas.y + (pick.y0 + pick.y1) / 2);
     await page.waitForSelector('.bet-card');
     // 3. Card, underlying positions, purchase.
     const shown = (await page.textContent('.bet-price .num')).trim();
-    const m = Math.min(100, 1 / pick.price);
-    const want = m >= 99.95 ? '100x' : m >= 10 ? `${m.toFixed(1)}x` : `${m.toFixed(2)}x`;
+    const c = pick.price * 100;
+    const want = c >= 9.95 ? `${Math.round(c)}¢` : `${(Math.round(c * 10) / 10).toFixed(1)}¢`;
     if (shown !== want) fail(`card shows ${shown}, box is ${want}`);
-    await page.fill('.stake-input input', String(stake));
+    // Under the minimum: can't buy.
+    await page.fill('.stake-input input', '5');
+    await page.waitForTimeout(50);
+    if (!(await page.isDisabled('.bet-card .primary'))) fail('a $5 bet (under the minimum) can be placed');
+    const minText = (await page.textContent('.bet-card .form-error')) ?? '';
+    const min = Number(/minimum bet here is \$([\d,]+)/.exec(minText)?.[1].replace(/,/g, ''));
+    if (!(min >= 10)) fail(`no minimum shown for a $5 bet ("${minText}")`);
+    const bet = Math.max(stake, min);
+    await page.fill('.stake-input input', String(bet));
     if ((await page.getAttribute('.underlying-btn', 'aria-expanded')) !== 'true') await page.click('.underlying-btn');
     const rows = await page.$$eval('.underlying tr', (r) => r.map((x) => x.innerText.replace(/\s+/g, ' ')));
     const ymd = new Date(pick.expiry).toISOString().slice(0, 10).replace(/-/g, '');
@@ -135,8 +156,16 @@ for (const [asset, horizon, colFrac, chance, stake] of cases) {
     if (Math.abs(payAt(win) - 1) > 1e-9) fail(`pays ${payAt(win)} per share when right, not $1`);
     if (Math.abs(payAt(lose)) > 1e-9) fail(`pays ${payAt(lose)} per share when wrong, not $0`);
     if (Math.abs(payAt((b.lo + b.hi) / 2) - 0.5) > 1e-9) fail(`pays ${payAt((b.lo + b.hi) / 2)} in the middle, not 50¢`);
-    const paid = pos.legs.reduce((a, l) => a + l.side * l.qty * l.entry, 0);
-    if (Math.abs(paid - stake) > 0.01 * stake) fail(`legs cost $${paid.toFixed(2)} for a $${stake} bet`);
+    const qty = pos.legs[0].qty;
+    if (Math.abs(qty * 100 - Math.round(qty * 100)) > 1e-6 || qty < 0.1) fail(`${qty} contracts isn't a size Derive accepts`);
+    // Premium plus Derive's fees on both legs, independently: $0.50 + min(0.03% of the index, 12.5% of the price) per contract.
+    const spot = await page.evaluate(() => window.__chart.spot);
+    const premium = pos.legs.reduce((a, l) => a + l.side * l.qty * l.entry, 0);
+    const fees = pos.legs.reduce((a, l) => a + 0.5 + Math.min(0.0003 * spot, 0.125 * l.entry) * l.qty, 0);
+    const paid = premium + fees;
+    const step = (premium + fees - 1) / qty * 0.01;
+    if (paid > bet + 1e-6 || paid < bet - step - 0.01) fail(`bet costs $${paid.toFixed(2)} (incl. $${fees.toFixed(2)} fees) for a $${bet} stake`);
+    if (Math.abs(b.entry * b.shares - paid) > 1e-6) fail(`recorded $${(b.entry * b.shares).toFixed(2)} in, cost $${paid.toFixed(2)}`);
     // 4. Listed, then sold.
     const listed = await page.$$eval('.bet-list li', (l) => l.length);
     if (listed !== before + 1) fail(`bet list has ${listed} rows, expected ${before + 1}`);

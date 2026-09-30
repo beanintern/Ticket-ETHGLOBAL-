@@ -64,7 +64,7 @@ SEED=7 ONLY=113 npm run check:chart   # replay one case
 npm run check:live    # the live Derive layer against the real exchange
 NETWORK=testnet npm run check:live
 npm run check:draw    # draws paths with the mouse and checks the position built from each
-npm run check:easy    # Easy mode grid: boxes, multipliers vs independent pricing, $1 payout
+npm run check:easy    # Easy mode grid: boxes, share prices vs independent pricing, sizes, fees, $1 payout
 ```
 
 - `check:chart` checks named structures (spreads, condors, butterflies, calendars, single
@@ -81,9 +81,11 @@ npm run check:easy    # Easy mode grid: boxes, multipliers vs independent pricin
   shown as a guide, and that undo restores the previous ticket.
 - `check:easy` checks the whole grid across assets and zooms (no overlapping boxes, columns
   ending on their expiries, edges on listed strikes, the right direction, and every box's
-  multiplier against an independent spread valuation), then bets on boxes above and below the
-  price: the card's multiplier, the underlying positions listed, that $X costs $X, that shares
-  pay exactly $1 / $0 / 50¢, and that bets list and sell.
+  share price against an independent spread valuation, exactly; boxes under 1¢ or over 99¢
+  unavailable and unclickable), then bets on boxes above and below the price: the card's share
+  price, the underlying positions listed, that a bet under the minimum can't be placed, that $X
+  buys a Derive-sized order costing at most $X with fees, that shares pay exactly $1 / $0 /
+  50¢, and that bets list and sell.
 - `check:live` loads real Derive data with the app's own code and checks expiries, strikes,
   the index and history, that our pricing reproduces Derive's mark prices (within 0.5%), and
   that IV for unlisted strikes is interpolated sensibly.
@@ -112,14 +114,22 @@ npm run check:easy    # Easy mode grid: boxes, multipliers vs independent pricin
   run from one listed expiry to the next; rows are bands between listed strikes on that expiry
   (merged until they're tall enough to tap), so boxes differ in size: near-dated strikes are
   finer. Each box is one bet: above the index, "ends above this band on that date"; below it,
-  "ends below". The box shows its multiplier, what $1 pays if right (1 / price, capped at 100x).
-  Under the hood a bet is a call (or put) spread between the band's strikes, sized so the gap
-  is $1 per share: it pays $1 past the far strike, $0 on the losing side and part-way inside
-  the band, and costs its price per $1, the market-implied probability. The bet card shows the
-  multiplier, chance, shares and payout, and **Show underlying positions** lists the exact
-  options opened (instrument, side, size, price). Placed bets are outlined on their box with
-  what went in and what they're worth now, and can be sold any time. There's no payoff map in
-  Easy mode.
+  "ends below". The box shows the price of a share that pays $1 if right, which is also the
+  market's implied chance (21¢ = 21%). Under the hood a bet is a call (or put) spread between the
+  band's strikes, sized so the gap is $1 per share: it pays $1 past the far strike, $0 on the
+  losing side and part-way inside the band. Prices are exact (a 0.8¢ share shows 0.8¢, never
+  rounded up) and refresh with every market update.
+  Only bets that can really trade are offered: share prices between 1¢ and 99¢, and on Derive
+  data, the bought option must have a seller and the sold one a buyer (other boxes are faint
+  and can't be clicked). Bets start at $10, or more where Derive's smallest order (0.1
+  contracts) costs more (BTC bands are $1,000 wide). A stake buys what it would on Derive:
+  contracts rounded down to Derive's 0.01 step, and Derive's fees included ($0.50 per option
+  plus 0.03% of the index per contract, capped at 12.5% of the option's price). The card says
+  when fees are a big part of a bet, which happens on cheap far-away shares. The card shows
+  the share price, chance, shares, fees and payout, and **Show underlying positions** lists the
+  exact options opened (instrument, side, size, price). Placed bets are outlined on their box
+  with what went in and what they're worth now, and can be sold any time. There's no payoff map
+  in Easy mode.
 
   On **Testnet** with a Derive account connected, bets are real orders (test funds). The card
   asks Derive for a dry run of both legs and shows the real price per share (spread and fees

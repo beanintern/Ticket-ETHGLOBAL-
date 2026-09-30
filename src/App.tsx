@@ -6,12 +6,12 @@ import type { Trading } from './components/DeriveReview';
 import { AccountButton, AccountPanel } from './components/AccountPanel';
 import { Chart, TOOL_LEG, type ChartView, type LegTool, type Tool } from './components/Chart';
 import { fitPath, payoffAlongPath, type PathPoint } from './lib/pathfit';
-import { betCost, betLegs, betQuestion, quoteBet, type BetQuote } from './lib/binary';
+import { betCost, betLegs, betQuestion, fmtCents, minStake, quoteBet, sizeBet, type BetQuote } from './lib/binary';
 import { EasyPanel, sharePrice } from './components/EasyPanel';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
 import { bsPrice } from './lib/bs';
-import { price as fmtPrice, signed, signedUsd } from './lib/format';
+import { price as fmtPrice, signed, signedUsd, usd } from './lib/format';
 import { createSource, pickSourceKind } from './data';
 import type { Market, MarketSource } from './data/types';
 import { DAY, HOUR, MARKETS, YEAR, expiryLabel, priceAt, type Asset } from './lib/market';
@@ -366,7 +366,13 @@ export default function App() {
   const chartModel = buildModel(chartLegs, market, now);
   const bets = positions.filter((p) => p.bet);
   const buyBet = (q: BetQuote, amount: number) => {
-    const shares = amount / q.price;
+    // Sized as it would be on Derive: fees included, contracts on its 0.01 grid, at least its minimum.
+    const size = q.unavailable || amount < minStake(q, markets[q.asset].spot) ? null : sizeBet(q, amount, markets[q.asset].spot);
+    if (!size) {
+      setToast(q.unavailable ?? `The minimum bet here is $${minStake(q, markets[q.asset].spot)}.`);
+      return;
+    }
+    const { shares, fees } = size;
     const legs = betLegs(q, shares);
     const m = buildModel(legs, markets[q.asset], now);
     const pos: Position = {
@@ -376,12 +382,12 @@ export default function App() {
       legs: legs.map((l, i) => ({ ...l, entry: m.marks[i] })),
       openedAt: now,
       openSpot: markets[q.asset].spot,
-      // What was actually paid per share (the legs at mark), which is the quote.
-      bet: { dir: q.dir, level: q.level, lo: q.lo, hi: q.hi, expiry: q.expiry, shares, entry: m.cost / shares },
+      // What was paid per share: the legs at mark plus Derive's fees.
+      bet: { dir: q.dir, level: q.level, lo: q.lo, hi: q.hi, expiry: q.expiry, shares, entry: (m.cost + fees) / shares },
     };
     setPositions((ps) => [pos, ...ps]);
     setPick(null);
-    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${Math.round((m.cost / shares) * 100)}¢: ${pos.name} (paper)`);
+    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${fmtCents(m.cost / shares)} plus ${usd(fees, 2)} fees: ${pos.name} (paper)`);
   };
   const easyLayer = easy
     ? {
@@ -624,7 +630,7 @@ export default function App() {
     setPositions((ps) => [pos, ...ps]);
     setPick(null);
     const extra = results.some((r) => r.filled > amount + 1e-9) ? ' (one leg filled a little more; the extra shows in Pro › Positions)' : '';
-    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${Math.round(cost.perShare * 100)}¢ on Derive testnet: ${pos.name}${extra}`);
+    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${fmtCents(cost.perShare)} on Derive testnet: ${pos.name}${extra}`);
   };
 
   // Selling a testnet bet: close the sold leg first, then the bought one, reduce-only.
@@ -921,8 +927,8 @@ export default function App() {
                 <span>
                   <i className="sw sw-loss" /> Ends below
                 </span>
-                <span className="hint">Each box pays its multiplier if the price ends past it on that date · drag to pan · scroll to zoom</span>
-                <span className="hint-touch">Tap a box to bet · it pays its multiplier if the price ends past it</span>
+                <span className="hint">Each box is a share's price: it pays $1 if the price ends past it on that date · drag to pan · scroll to zoom</span>
+                <span className="hint-touch">Tap a box to bet · a share pays $1 if the price ends past it</span>
               </>
             ) : (
               <>

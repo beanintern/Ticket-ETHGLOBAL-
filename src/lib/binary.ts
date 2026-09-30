@@ -7,7 +7,7 @@
 // per $1 is the market's implied probability of finishing past the midpoint L, which is what
 // the share is priced (and labelled) at.
 import type { Market } from '../data/types';
-import { bsPrice, normCdf } from './bs';
+import { bsPrice } from './bs';
 import { YEAR, type Asset } from './market';
 import { newId, type Leg } from './strategy';
 
@@ -22,9 +22,25 @@ export interface BetQuote {
   hi: number;
   /** The question's price level: halfway between the strikes. */
   level: number;
-  /** Price of one $1 share, 0–1 (also the implied probability of "Yes"). */
+  /** Price of one $1 share, 0–1 (also the implied probability of "Yes"), exactly, not rounded. */
   price: number;
+  /** Each leg's price per contract (bought leg, then sold leg). */
+  legPrices: [number, number];
+  /** Why this bet can't be placed (too unlikely, too certain, or nobody quoting a leg), or null. */
+  unavailable: string | null;
 }
+
+/**
+ * Derive's rules for option orders (the same on mainnet and testnet): sizes in 0.01-contract
+ * steps, at least 0.1 contracts, and each order pays a $0.50 base fee plus 0.03% of the index per
+ * contract, that part capped at 12.5% of the option's price.
+ */
+export const DERIVE_OPTION = { minAmount: 0.1, amountStep: 0.01, baseFee: 0.5, takerRate: 0.0003, feeCap: 0.125 };
+/** Smallest bet: keeps the two $0.50 base fees to a tenth of the stake or less. */
+export const MIN_BET = 10;
+/** Bets are offered between these share prices: below 1¢ a share is a lottery ticket nobody makes a market in, above 99¢ there's nothing to win. */
+export const MIN_PRICE = 0.01;
+export const MAX_PRICE = 0.99;
 
 export interface BetInfo {
   dir: BetDir;
@@ -58,13 +74,74 @@ export function quoteBet(market: Market, asset: Asset, expiry: number, price: nu
   const dir: BetDir = (lo + hi) / 2 >= spot ? 'above' : 'below';
   const T = (expiry - now) / YEAR;
   const w = hi - lo;
-  const value =
-    dir === 'above'
-      ? bsPrice('C', spot, lo, T, market.iv('C', lo, expiry, now)) - bsPrice('C', spot, hi, T, market.iv('C', hi, expiry, now))
-      : bsPrice('P', spot, hi, T, market.iv('P', hi, expiry, now)) - bsPrice('P', spot, lo, T, market.iv('P', lo, expiry, now));
-  const p = Math.min(0.99, Math.max(0.01, value / w));
-  return { asset, expiry, dir, lo, hi, level: (lo + hi) / 2, price: p };
+  const type = dir === 'above' ? 'C' : 'P';
+  const [buyK, sellK] = dir === 'above' ? [lo, hi] : [hi, lo];
+  const buyPx = bsPrice(type, spot, buyK, T, market.iv(type, buyK, expiry, now));
+  const sellPx = bsPrice(type, spot, sellK, T, market.iv(type, sellK, expiry, now));
+  const p = Math.min(1, Math.max(0, (buyPx - sellPx) / w));
+  let unavailable: string | null = null;
+  if (p < MIN_PRICE) unavailable = 'Under a 1% chance: too unlikely to offer';
+  else if (p > MAX_PRICE) unavailable = 'Over a 99% chance: nothing to win';
+  else {
+    // On Derive, the bought leg needs someone selling it and the sold leg someone buying it.
+    const bq = market.quote(type, buyK, expiry);
+    const sq = market.quote(type, sellK, expiry);
+    if (bq && !(bq.ask && bq.ask > 0)) unavailable = `Nobody is selling the ${buyK} ${type === 'C' ? 'call' : 'put'} right now`;
+    else if (sq && !(sq.bid && sq.bid > 0)) unavailable = `Nobody is buying the ${sellK} ${type === 'C' ? 'call' : 'put'} right now`;
+  }
+  return { asset, expiry, dir, lo, hi, level: (lo + hi) / 2, price: p, legPrices: [buyPx, sellPx], unavailable };
 }
+
+/** Derive's fee for one option order of `contracts` at `price` each, with the index at `spot`. */
+export function optionFee(contracts: number, price: number, spot: number): number {
+  const { baseFee, takerRate, feeCap } = DERIVE_OPTION;
+  return baseFee + Math.min(takerRate * spot, feeCap * price) * contracts;
+}
+
+export interface BetSize {
+  /** Contracts of each leg, on Derive's 0.01 grid. */
+  contracts: number;
+  shares: number;
+  /** Net option premium, fees, and the two together (what the bet costs). */
+  premium: number;
+  fees: number;
+  cost: number;
+}
+
+/**
+ * The bet that `stake` dollars buys at the quoted prices, fees included, rounded down to a size
+ * Derive accepts. Null if that's under Derive's minimum order.
+ */
+export function sizeBet(q: BetQuote, stake: number, spot: number): BetSize | null {
+  const { baseFee, takerRate, feeCap, amountStep, minAmount } = DERIVE_OPTION;
+  const [b, s] = q.legPrices;
+  // Cost per contract of the pair, fees' per-contract part included; the base fees are fixed.
+  const perContract = b - s + Math.min(takerRate * spot, feeCap * b) + Math.min(takerRate * spot, feeCap * s);
+  if (!(perContract > 0)) return null;
+  const contracts = Math.floor(((stake - 2 * baseFee) / perContract + 1e-9) / amountStep) * amountStep;
+  return contracts >= minAmount - 1e-9 ? betOfSize(q, contracts, spot) : null;
+}
+
+export function betOfSize(q: BetQuote, contracts: number, spot: number): BetSize {
+  const [b, s] = q.legPrices;
+  const premium = (b - s) * contracts;
+  const fees = optionFee(contracts, b, spot) + optionFee(contracts, s, spot);
+  return { contracts, shares: contracts * (q.hi - q.lo), premium, fees, cost: premium + fees };
+}
+
+/** The least you can bet on this: MIN_BET, or more if Derive's minimum order costs more. */
+export function minStake(q: BetQuote, spot: number): number {
+  return Math.max(MIN_BET, Math.ceil(betOfSize(q, DERIVE_OPTION.minAmount, spot).cost));
+}
+
+/** A share price in cents, to a tenth of a cent below 10¢ (so 0.8¢ never shows as 1¢): "21¢", "4.5¢", "0.8¢". */
+export function fmtCents(p: number): string {
+  const c = p * 100;
+  return c >= 9.95 ? `${Math.round(c)}¢` : `${(Math.round(c * 10) / 10).toFixed(1)}¢`;
+}
+
+/** A chance in percent, to a tenth below 10%. */
+export const fmtChance = (p: number) => `${p * 100 >= 10 ? Math.round(p * 100) : (Math.round(p * 1000) / 10).toFixed(1)}%`;
 
 /** The option legs for `shares` Yes shares: the spread, sized so it pays $1 per share. */
 export function betLegs(q: Pick<BetQuote, 'asset' | 'expiry' | 'dir' | 'lo' | 'hi'>, shares: number): Leg[] {
@@ -79,21 +156,6 @@ export function sharePayoff(b: Pick<BetInfo, 'dir' | 'lo' | 'hi'>, S: number): n
   const up = Math.min(1, Math.max(0, f));
   return b.dir === 'above' ? up : 1 - up;
 }
-
-/**
- * The probability cone behind easy mode: at time t, the implied chance the index ends up beyond
- * price S in S's direction from spot (above if S is above spot, below if below).
- */
-export function beyondProbability(spot: number, S: number, T: number, iv: number): number {
-  if (T <= 0 || iv <= 0) return 0;
-  const sq = iv * Math.sqrt(T);
-  const d2 = (Math.log(spot / S) - 0.5 * sq * sq) / sq;
-  return S >= spot ? normCdf(d2) : normCdf(-d2);
-}
-
-/** Payout per $1 staked at a share price (0–1): Euphoria-style multiplier, capped at 100x. */
-export const multiplier = (price: number) => Math.min(100, 1 / Math.max(price, 0.01));
-export const fmtMultiplier = (m: number) => (m >= 99.95 ? '100x' : m >= 10 ? `${m.toFixed(1)}x` : `${m.toFixed(2)}x`);
 
 export const betQuestion = (asset: Asset, dir: BetDir, level: number) => `${asset} ${dir} $${Math.round(level).toLocaleString('en-US')}`;
 

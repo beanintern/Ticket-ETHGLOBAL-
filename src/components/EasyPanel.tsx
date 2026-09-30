@@ -2,14 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import type { OrderPreview } from '../account/derive';
 import type { LegOrder } from '../account/orders';
 import type { Trading } from './DeriveReview';
-import { betCost, betLegs, betQuestion, fmtMultiplier, multiplier, sharePayoff, type BetQuote } from '../lib/binary';
+import { betCost, betLegs, betQuestion, fmtCents, fmtChance, MIN_BET, minStake, sharePayoff, sizeBet, type BetQuote } from '../lib/binary';
 import { instrumentName } from '../account/orders';
 import { signedUsd, usd } from '../lib/format';
 import { expiryLabel, type Asset } from '../lib/market';
 import { buildModel, type Position } from '../lib/strategy';
 import type { Market } from '../data/types';
 
-const cents = (p: number) => `${Math.round(p * 100)}¢`;
+const cents = fmtCents;
 const pnlClass = (v: number) => (v > 0.005 ? 'up' : v < -0.005 ? 'down' : '');
 
 interface Props {
@@ -47,11 +47,16 @@ export function sharePrice(pos: Position, markets: Record<Asset, Market>, now: n
 }
 
 export function EasyPanel({ asset, now, markets, pending, stake, onStake: setStake, onCancel, onBuy, bets, onSell, venue }: Props) {
-  const fairShares = pending ? stake / pending.price : 0;
+  const spot = pending ? markets[pending.asset].spot : 0;
+  // What the stake buys at the quoted prices, Derive's fees included, on Derive's size grid.
+  const size = pending ? sizeBet(pending, stake, spot) : null;
+  const minBet = pending ? minStake(pending, spot) : 0;
+  const tooSmall = !!pending && stake < minBet;
+  const fairShares = size?.shares ?? 0;
 
   // Live (testnet): ask Derive for a dry run of both legs, so the card shows the real cost.
   const live = venue.kind === 'live' ? venue : null;
-  const quoteKey = live && pending && stake > 0 ? `${pending.asset}|${pending.expiry}|${pending.dir}|${pending.lo}|${pending.hi}|${stake}` : '';
+  const quoteKey = live && pending && !pending.unavailable && !tooSmall && size ? `${pending.asset}|${pending.expiry}|${pending.dir}|${pending.lo}|${pending.hi}|${stake}` : '';
   const [liveQuote, setLiveQuote] = useState<LiveQuote | null>(null);
   const [sending, setSending] = useState(false);
   useEffect(() => {
@@ -61,7 +66,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
     // Quote at the fair price first, then resize once at Derive's real price (spread and fees
     // included), so what you pay is the amount you entered.
     const quote = async () => {
-      const first = await live.trading.prepare(betLegs(pending, stake / pending.price), 'market');
+      const first = await live.trading.prepare(betLegs(pending, fairShares), 'market');
       const c = betCost(first.orders.map((o, i) => ({ direction: o.direction, amount: first.previews[i].fillAmount, price: first.previews[i].fillPrice, fee: first.previews[i].fee })), gapNow);
       if (!(c.perShare > 0) || Math.abs(c.cost - stake) < stake * 0.02) return first;
       return live.trading.prepare(betLegs(pending, stake / c.perShare), 'market');
@@ -132,7 +137,8 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               on that box's date.
             </p>
             <p className="fine">
-              Each box shows what $1 pays if you're right: <b>4.00x</b> means $1 wins $4, and a 1 in 4 chance. Further away and sooner pays more.
+              Each box shows the price of a share that pays $1 if you're right: <b>25¢</b> means the market gives it a 25% chance, and $10 buys 40 shares
+              (less Derive's fees). Further away and sooner is cheaper. Faint boxes can't be traded right now. Bets start at $10.
             </p>
           </div>
         ) : (
@@ -147,18 +153,18 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               Will {asset} be {pending.dir} ${Math.round(pending.level).toLocaleString('en-US')} on {expiryLabel(pending.expiry)}?
             </h2>
             <div className="bet-price">
-              <span className="num">{fmtMultiplier(multiplier(pending.price))}</span>
+              <span className="num">{cents(pending.price)}</span>
               <span>
-                {Math.round(pending.price * 100)}% chance · {cents(pending.price)} a share
+                a share · {fmtChance(pending.price)} chance
                 <br />
-                each share pays $1
+                each share pays $1 if right
               </span>
             </div>
             <label className="bet-stake">
               <span>Amount</span>
               <div className="stake-input">
                 <span>$</span>
-                <input type="number" min={1} step={1} value={stake} onChange={(e) => setStake(Math.max(0, Number(e.target.value) || 0))} />
+                <input type="number" min={minBet} step={1} value={stake} onChange={(e) => setStake(Math.max(0, Number(e.target.value) || 0))} />
               </div>
               <div className="stake-quick">
                 {[10, 50, 100].map((v) => (
@@ -168,18 +174,39 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 ))}
               </div>
             </label>
+            {pending.unavailable ? (
+              <p className="form-error">{pending.unavailable}. Pick another box.</p>
+            ) : tooSmall ? (
+              <p className="form-error">
+                The minimum bet here is {usd(minBet, 0)}
+                {minBet > MIN_BET
+                  ? ": Derive's smallest order (0.1 contracts) plus its $0.50 fee on each of the two options."
+                  : ', so the $0.50 Derive fee on each of the two options stays a small part of it.'}
+              </p>
+            ) : null}
+            {!live && size && !tooSmall && !pending.unavailable && size.fees > size.cost * 0.1 && (
+              <p className="fine">
+                Derive's fees are {Math.round((size.fees / size.cost) * 100)}% of this bet: each option pays a $0.50 base fee plus up to 12.5% of its price.
+              </p>
+            )}
             <dl className="bet-sum">
               <div>
                 <dt>Shares</dt>
-                <dd className="num">{shares.toFixed(1)}</dd>
+                <dd className="num">{tooSmall || pending.unavailable ? '–' : shares.toFixed(1)}</dd>
               </div>
+              {!live && (
+                <div>
+                  <dt>Derive fees</dt>
+                  <dd className="num">{size && !tooSmall ? usd(size.fees, 2) : '–'}</dd>
+                </div>
+              )}
               <div>
                 <dt>If Yes, you get</dt>
-                <dd className="num up">{usd(shares, 2)}</dd>
+                <dd className="num up">{tooSmall || pending.unavailable ? '–' : usd(shares, 2)}</dd>
               </div>
               <div>
                 <dt>Profit if right</dt>
-                <dd className="num up">{signedUsd(shares - (live && liveCost ? liveCost.cost : stake))}</dd>
+                <dd className="num up">{tooSmall || pending.unavailable ? '–' : signedUsd(shares - (live ? (liveCost?.cost ?? 0) : (size?.cost ?? 0)))}</dd>
               </div>
             </dl>
             {live ? (
@@ -208,7 +235,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 )}
                 {liveCost && liveCost.perShare < 1 && liveCost.perShare - pending.price > Math.max(0.1, pending.price * 0.5) && (
                   <p className="form-error">
-                    Thin market: you'd pay {cents(liveCost.perShare)} for a {Math.round(pending.price * 100)}% chance. Try a nearer date or price, or bet on paper.
+                    Thin market: you'd pay {cents(liveCost.perShare)} for a {fmtChance(pending.price)} chance. Try a nearer date or price, or bet on paper.
                   </p>
                 )}
                 {partial && !liveInvalid && (
@@ -230,14 +257,14 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 >
                   {sending ? 'Sending…' : `Buy Yes on Derive · ${liveCost ? usd(liveCost.cost, 2) : usd(stake, 0)}`}
                 </button>
-                <button className="link" onClick={() => onBuy(pending, stake)}>
+                <button className="link" disabled={!size || tooSmall || !!pending.unavailable} onClick={() => onBuy(pending, stake)}>
                   Paper bet instead
                 </button>
               </div>
             ) : (
               <>
-                <button className="primary" disabled={!(stake > 0)} onClick={() => onBuy(pending, stake)}>
-                  Buy Yes · {usd(stake, 0)}
+                <button className="primary" disabled={!size || tooSmall || !!pending.unavailable} onClick={() => onBuy(pending, stake)}>
+                  Buy Yes · {size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}
                   {venue.kind === 'connect' ? ' (paper)' : ''}
                 </button>
                 {venue.kind === 'connect' && (
