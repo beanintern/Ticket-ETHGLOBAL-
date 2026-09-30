@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DeriveAccount, loadCredentials, type AccountState, type Credentials, type OrderResult, type Portfolio } from './account/derive';
 import { forgetSessionKey, hasMetaMask, metaMaskSigner, registerSessionKey, savedSessionKey } from './account/metamask';
-import { instrumentName, legOrders, type OrderMode } from './account/orders';
+import { instrumentName, legOrders, type LegOrder, type OrderMode } from './account/orders';
 import type { Trading } from './components/DeriveReview';
 import { AccountButton, AccountPanel } from './components/AccountPanel';
 import { Chart, TOOL_LEG, type ChartView, type LegTool, type Tool } from './components/Chart';
 import { fitPath, payoffAlongPath, type PathPoint } from './lib/pathfit';
-import { betLegs, betQuestion, quoteBet, type BetQuote } from './lib/binary';
+import { betCost, betLegs, betQuestion, quoteBet, type BetQuote } from './lib/binary';
 import { EasyPanel, sharePrice } from './components/EasyPanel';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
@@ -584,6 +584,75 @@ export default function App() {
     }
   };
 
+  // Easy mode on Derive testnet: a bet is its two legs, sent together (the buy first, so a
+  // half-filled bet leaves a bought option, never a naked sale).
+  const buyBetLive = async (q: BetQuote, orders: LegOrder[], estFees: number) => {
+    if (!trading) return;
+    const results = await trading.place(orders, 'market');
+    const gap = q.hi - q.lo;
+    const allFilled = results.length === orders.length && results.every((r) => r.ok && r.filled > 0);
+    if (!allFilled) {
+      const first = results[0];
+      if (first?.ok && first.filled > 0)
+        setToast(
+          `Only part of the bet went through: bought ${first.filled} ${first.order.instrument} but the other leg didn't fill. You hold that option: see Pro › Positions to close it.`,
+        );
+      else reportOrders(results, 'Bet');
+      return;
+    }
+    const amount = Math.min(...results.map((r) => r.filled));
+    const shares = amount * gap;
+    // Fills don't report fees, so use Derive's estimate from the quote, scaled to what filled.
+    const ordered = Math.min(...orders.map((o) => Number(o.amount)));
+    const fees = ordered > 0 ? estFees * (amount / ordered) : 0;
+    const cost = betCost(
+      results.map((r, i) => ({ direction: r.order.direction, amount, price: r.averagePrice, fee: i === 0 ? fees : 0 })),
+      gap,
+    );
+    const legs = betLegs(q, shares).map((l, i) => ({ ...l, entry: results[i].averagePrice }));
+    const pos: Position = {
+      id: newId('pos'),
+      asset: q.asset,
+      name: `${betQuestion(q.asset, q.dir, q.level)} · ${expiryLabel(q.expiry)}`,
+      legs,
+      openedAt: now,
+      openSpot: markets[q.asset].spot,
+      venue: 'derive-testnet',
+      bet: { dir: q.dir, level: q.level, lo: q.lo, hi: q.hi, expiry: q.expiry, shares, entry: cost.perShare },
+    };
+    setPositions((ps) => [pos, ...ps]);
+    setPick(null);
+    const extra = results.some((r) => r.filled > amount + 1e-9) ? ' (one leg filled a little more; the extra shows in Pro › Positions)' : '';
+    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${Math.round(cost.perShare * 100)}¢ on Derive testnet: ${pos.name}${extra}`);
+  };
+
+  // Selling a testnet bet: close the sold leg first, then the bought one, reduce-only.
+  const sellBet = async (id: string) => {
+    const pos = positions.find((p) => p.id === id);
+    if (!pos) return;
+    if (pos.venue !== 'derive-testnet') return closePosition(id);
+    if (!account) {
+      setToast('Connect your Derive testnet account to sell this bet.');
+      return;
+    }
+    try {
+      const closing = [...pos.legs].sort((a, b) => a.side - b.side);
+      const instruments = await account.instruments(closing.map(instrumentName));
+      const results = await account.place(legOrders(closing, markets[pos.asset], instruments, 'market', true), 'market');
+      if (!results.every((r) => r.ok && r.filled > 0)) {
+        reportOrders(results, 'Sell');
+        return;
+      }
+      const proceeds = results.reduce((a, r) => a + (r.order.direction === 'sell' ? 1 : -1) * r.averagePrice * r.filled, 0);
+      const paid = pos.bet ? pos.bet.entry * pos.bet.shares : 0;
+      setPositions((ps) => ps.filter((p) => p.id !== id));
+      setClosed((c) => [{ id, asset: pos.asset, name: pos.name, openedAt: pos.openedAt, closedAt: now, realized: proceeds - paid }, ...c]);
+      setToast(`Sold on Derive testnet: ${pos.name} (${signedUsd(proceeds - paid)})`);
+    } catch (e) {
+      setToast(`Couldn't sell: ${(e as Error).message}`);
+    }
+  };
+
   const placeOrder = () => {
     if (!builderLegs.length) return;
     const legs = builderLegs.map((l, i) => ({ ...l, id: newId(), entry: builderModel.marks[i] }));
@@ -902,7 +971,14 @@ export default function App() {
             onCancel={() => setPick(null)}
             onBuy={buyBet}
             bets={bets}
-            onSell={closePosition}
+            onSell={(id) => void sellBet(id)}
+            venue={
+              trading
+                ? { kind: 'live', trading, onBuyLive: buyBetLive }
+                : accountEnabled
+                  ? { kind: 'connect', onConnect: () => setAccountOpen(true) }
+                  : { kind: 'paper' }
+            }
           />
         ) : (
         <Sidebar

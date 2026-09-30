@@ -115,8 +115,18 @@ npm run check:easy    # Easy mode bets: question, price vs independent pricing, 
   sized so the strike gap is $1: it pays $1 past the far strike, $0 on the losing side and
   part-way in between, and it costs its price per $1, which is the market-implied probability
   (so 21¢ = 21% chance). The card shows shares, payout and profit, and the chart switches to the
-  bet's win/lose map. Bets are paper trades for now; they appear on the chart with their price
-  paid and price now, and can be sold any time.
+  bet's win/lose map. Bets appear on the chart with their price paid and price now, and can be
+  sold any time.
+
+  On **Testnet** with a Derive account connected, bets are real orders (test funds). The card
+  asks Derive for a dry run of both legs and shows the real price per share (spread and fees
+  included) next to the fair price, sizing the bet so what you pay is the amount you entered.
+  It warns when the book is thin (e.g. 51¢ for a 10% chance) and refuses a share that would cost
+  more than $1. Buying sends both legs as immediate-or-cancel orders, the bought option first,
+  so a half-filled bet leaves a bought option, never a naked sale. A filled bet is recorded at
+  its fill prices (plus Derive's fee estimate) and tagged Derive; selling closes the sold leg
+  first, then the bought one, reduce-only. Without an account, testnet bets are paper, with a
+  link to connect. The builder code rides on every order as usual.
 - **Draw path** (`src/lib/pathfit.ts`). Pick the Draw tool (`5`) and draw where you think price
   goes, left to right. On release the ticket becomes a position that pays off along that path:
   on each listed expiry the path spans (up to six, spread evenly, plus the next one if the path

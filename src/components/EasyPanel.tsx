@@ -1,5 +1,8 @@
-import { useEffect, useRef } from 'react';
-import { betQuestion, sharePayoff, type BetQuote } from '../lib/binary';
+import { useEffect, useRef, useState } from 'react';
+import type { OrderPreview } from '../account/derive';
+import type { LegOrder } from '../account/orders';
+import type { Trading } from './DeriveReview';
+import { betCost, betLegs, betQuestion, sharePayoff, type BetQuote } from '../lib/binary';
 import { signedUsd, usd } from '../lib/format';
 import { expiryLabel, type Asset } from '../lib/market';
 import { buildModel, type Position } from '../lib/strategy';
@@ -19,7 +22,22 @@ interface Props {
   onBuy: (q: BetQuote, stake: number) => void;
   bets: Position[];
   onSell: (id: string) => void;
+  /** Paper bets, a prompt to connect (testnet, no account), or real orders on Derive testnet. */
+  venue: { kind: 'paper' } | { kind: 'connect'; onConnect: () => void } | { kind: 'live'; trading: Trading; onBuyLive: (q: BetQuote, orders: LegOrder[], estFees: number) => Promise<void> };
 }
+
+/** Exchange errors a bettor can act on, in plain words. */
+function friendlyError(msg: string, q: BetQuote): string {
+  if (/minimum size is ([\d.]+)/i.test(msg)) {
+    const min = Number(/minimum size is ([\d.]+)/i.exec(msg)![1]);
+    const shares = min * (q.hi - q.lo);
+    return `Too small for Derive: the minimum here is ${shares.toFixed(0)} shares, about $${Math.ceil(shares * q.price)} at the fair price. Increase the amount.`;
+  }
+  if (/zero liquidity|no liquidity/i.test(msg)) return 'Nobody is quoting one of these options on testnet right now. Try a nearer date or a price closer to today’s.';
+  return msg;
+}
+
+type LiveQuote = { key: string; orders: LegOrder[]; previews: OrderPreview[] } | { key: string; error: string };
 
 /** Current price of one share of a bet: the legs' value now, per share. */
 export function sharePrice(pos: Position, markets: Record<Asset, Market>, now: number): number {
@@ -27,8 +45,50 @@ export function sharePrice(pos: Position, markets: Record<Asset, Market>, now: n
   return pos.bet ? Math.min(1, Math.max(0, m.value / pos.bet.shares)) : 0;
 }
 
-export function EasyPanel({ asset, now, markets, pending, stake, onStake: setStake, onCancel, onBuy, bets, onSell }: Props) {
-  const shares = pending ? stake / pending.price : 0;
+export function EasyPanel({ asset, now, markets, pending, stake, onStake: setStake, onCancel, onBuy, bets, onSell, venue }: Props) {
+  const fairShares = pending ? stake / pending.price : 0;
+
+  // Live (testnet): ask Derive for a dry run of both legs, so the card shows the real cost.
+  const live = venue.kind === 'live' ? venue : null;
+  const quoteKey = live && pending && stake > 0 ? `${pending.asset}|${pending.expiry}|${pending.dir}|${pending.lo}|${pending.hi}|${stake}` : '';
+  const [liveQuote, setLiveQuote] = useState<LiveQuote | null>(null);
+  const [sending, setSending] = useState(false);
+  useEffect(() => {
+    if (!quoteKey || !live || !pending) return;
+    let alive = true;
+    const gapNow = pending.hi - pending.lo;
+    // Quote at the fair price first, then resize once at Derive's real price (spread and fees
+    // included), so what you pay is the amount you entered.
+    const quote = async () => {
+      const first = await live.trading.prepare(betLegs(pending, stake / pending.price), 'market');
+      const c = betCost(first.orders.map((o, i) => ({ direction: o.direction, amount: first.previews[i].fillAmount, price: first.previews[i].fillPrice, fee: first.previews[i].fee })), gapNow);
+      if (!(c.perShare > 0) || Math.abs(c.cost - stake) < stake * 0.02) return first;
+      return live.trading.prepare(betLegs(pending, stake / c.perShare), 'market');
+    };
+    const t = setTimeout(() => {
+      quote()
+        .then((r) => alive && setLiveQuote({ key: quoteKey, ...r }))
+        .catch((e) => alive && setLiveQuote({ key: quoteKey, error: friendlyError((e as Error).message, pending) }));
+    }, 350);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quoteKey]);
+  const lq = liveQuote && liveQuote.key === quoteKey ? liveQuote : null;
+  const gap = pending ? pending.hi - pending.lo : 1;
+  const liveOk = lq && 'orders' in lq ? lq : null;
+  const liveShares = liveOk ? Math.min(...liveOk.orders.map((o) => Number(o.amount))) * gap : 0;
+  const liveCost = liveOk
+    ? betCost(
+        liveOk.orders.map((o, i) => ({ direction: o.direction, amount: liveOk.previews[i].fillAmount, price: liveOk.previews[i].fillPrice, fee: liveOk.previews[i].fee })),
+        gap,
+      )
+    : null;
+  const liveInvalid = liveOk?.previews.find((p) => !p.valid)?.reason ?? null;
+  const partial = liveCost && liveCost.shares < liveShares - 1e-9;
+  const shares = live ? liveShares : fairShares;
   // On narrow screens the card sits below the chart: bring it into view when a bet is picked.
   const cardRef = useRef<HTMLDivElement>(null);
   const pickKey = pending ? `${pending.expiry}|${pending.level}` : '';
@@ -99,17 +159,79 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               </div>
               <div>
                 <dt>Profit if right</dt>
-                <dd className="num up">{signedUsd(shares - stake)}</dd>
+                <dd className="num up">{signedUsd(shares - (live && liveCost ? liveCost.cost : stake))}</dd>
               </div>
             </dl>
-            <button className="primary" disabled={!(stake > 0)} onClick={() => onBuy(pending, stake)}>
-              Buy Yes · {usd(stake, 0)}
-            </button>
+            {live ? (
+              <div className="bet-live">
+                {!lq ? (
+                  <p className="fine">Checking Derive testnet…</p>
+                ) : 'error' in lq ? (
+                  <p className="form-error">{lq.error}</p>
+                ) : (
+                  <div className="live-cost">
+                    <div>
+                      <span>On Derive testnet</span>
+                      <b className="num">{liveCost && liveCost.shares > 0 ? cents(liveCost.perShare) : '–'}</b>
+                      <span className="fine">per share · fair {cents(pending.price)}</span>
+                    </div>
+                    <div>
+                      <span>Cost now</span>
+                      <b className="num">{liveCost ? usd(liveCost.cost) : '–'}</b>
+                      <span className="fine">incl. {liveCost ? usd(liveCost.fees) : '–'} fees</span>
+                    </div>
+                  </div>
+                )}
+                {liveInvalid && <p className="form-error">{liveInvalid}</p>}
+                {liveCost && liveCost.perShare >= 1 && (
+                  <p className="form-error">At this price a share costs more than the $1 it can pay: don't buy.</p>
+                )}
+                {liveCost && liveCost.perShare < 1 && liveCost.perShare - pending.price > Math.max(0.1, pending.price * 0.5) && (
+                  <p className="form-error">
+                    Thin market: you'd pay {cents(liveCost.perShare)} for a {Math.round(pending.price * 100)}% chance. Try a nearer date or price, or bet on paper.
+                  </p>
+                )}
+                {partial && !liveInvalid && (
+                  <p className="fine">Only {liveCost!.shares.toFixed(1)} shares can fill right now; the rest of the order is cancelled.</p>
+                )}
+                {live.trading.canTrade === false && <p className="form-error">This session key can't trade: reconnect to create a trading key.</p>}
+                <button
+                  className="primary"
+                  disabled={!liveOk || !!liveInvalid || !liveCost || liveCost.shares <= 0 || liveCost.perShare >= 1 || sending || live.trading.canTrade === false}
+                  onClick={async () => {
+                    if (!liveOk) return;
+                    setSending(true);
+                    try {
+                      await live.onBuyLive(pending, liveOk.orders, liveCost?.fees ?? 0);
+                    } finally {
+                      setSending(false);
+                    }
+                  }}
+                >
+                  {sending ? 'Sending…' : `Buy Yes on Derive · ${liveCost ? usd(liveCost.cost, 2) : usd(stake, 0)}`}
+                </button>
+                <button className="link" onClick={() => onBuy(pending, stake)}>
+                  Paper bet instead
+                </button>
+              </div>
+            ) : (
+              <>
+                <button className="primary" disabled={!(stake > 0)} onClick={() => onBuy(pending, stake)}>
+                  Buy Yes · {usd(stake, 0)}
+                  {venue.kind === 'connect' ? ' (paper)' : ''}
+                </button>
+                {venue.kind === 'connect' && (
+                  <button className="link" onClick={venue.onConnect}>
+                    Connect your Derive testnet account to bet for real (test funds)
+                  </button>
+                )}
+              </>
+            )}
             <p className="fine">
               {(() => {
                 const [win, lose] = pending.dir === 'above' ? [pending.hi, pending.lo] : [pending.lo, pending.hi];
                 const [winWord, loseWord] = pending.dir === 'above' ? ['above', 'below'] : ['below', 'above'];
-                return `Pays $1 per share if ${asset} settles ${winWord} $${win.toLocaleString('en-US')} on ${expiryLabel(pending.expiry)}, nothing ${loseWord} $${lose.toLocaleString('en-US')}, and part-way in between. Built from a ${pending.lo}/${pending.hi} ${pending.dir === 'above' ? 'call' : 'put'} spread; you can sell any time before. Paper trade.`;
+                return `Pays $1 per share if ${asset} settles ${winWord} $${win.toLocaleString('en-US')} on ${expiryLabel(pending.expiry)}, nothing ${loseWord} $${lose.toLocaleString('en-US')}, and part-way in between. Built from a ${pending.lo}/${pending.hi} ${pending.dir === 'above' ? 'call' : 'put'} spread; you can sell any time before. ${live ? `On Derive testnet: two orders sent together, the buy first, each filling now within 3% of the best price or cancelled.` : 'Paper trade.'}`;
               })()}
             </p>
           </div>
@@ -136,6 +258,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                   <div className="bet-row">
                     <b>
                       {betQuestion(b.asset, bet.dir, bet.level)} · {expiryLabel(bet.expiry)}
+                      {b.venue === 'derive-testnet' && <span className="venue-tag">Derive</span>}
                     </b>
                     <span className={`num ${pnlClass(pnl)}`}>{signedUsd(pnl)}</span>
                   </div>

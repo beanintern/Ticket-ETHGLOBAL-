@@ -83,3 +83,25 @@ export function beyondProbability(spot: number, S: number, T: number, iv: number
 }
 
 export const betQuestion = (asset: Asset, dir: BetDir, level: number) => `${asset} ${dir} $${Math.round(level).toLocaleString('en-US')}`;
+
+/** One leg of a bet as sent to (or quoted by) the exchange. */
+export interface BetFill {
+  direction: 'buy' | 'sell';
+  /** Contracts. */
+  amount: number;
+  price: number;
+  fee: number;
+}
+
+/**
+ * The real cost of a bet on the exchange from its legs' quotes or fills: net premium plus fees,
+ * and per share. A share needs every leg, so the shares you actually get are limited by the
+ * least-filled leg.
+ */
+export function betCost(legs: BetFill[], strikeGap: number): { cost: number; fees: number; shares: number; perShare: number } {
+  const shares = legs.length ? Math.min(...legs.map((l) => l.amount)) * strikeGap : 0;
+  const premium = legs.reduce((a, l) => a + (l.direction === 'buy' ? 1 : -1) * l.price * l.amount, 0);
+  const fees = legs.reduce((a, l) => a + l.fee, 0);
+  const cost = premium + fees;
+  return { cost, fees, shares, perShare: shares > 0 ? cost / shares : 0 };
+}
