@@ -610,7 +610,8 @@ export function Chart(props: Props) {
 
     // ---- Candles (past) ----
     const pxPerHour = pxPerDay / 24;
-    const bucketH = [1, 2, 4, 6, 12, 24, 48].find((b) => b * pxPerHour >= 5) ?? 48;
+    // Wide enough candles to read at any zoom: up to a week each when zoomed right out.
+    const bucketH = [1, 2, 4, 6, 12, 24, 48, 96, 168].find((b) => b * pxPerHour >= 5) ?? 168;
     const bucket = bucketH * HOUR;
     const tLeft = xToT(0) - bucket;
     ctx.save();
@@ -619,11 +620,12 @@ export function Chart(props: Props) {
     ctx.clip();
     let i0 = candles.length - 1;
     while (i0 > 0 && candles[i0 - 1].t >= tLeft) i0--;
-    let bStart = Math.floor(candles[i0].t / bucket) * bucket;
-    let agg: Candle | null = null;
-    const bodyW = Math.max(1, bucketH * pxPerHour * 0.62);
-    const flush = (cd: Candle) => {
-      const x = tToX(cd.t + bucket / 2);
+    // A candle covers `span` ms: the bucket, or longer when the history itself is coarser there
+    // (older history is daily), so a daily candle is never drawn as a thin sliver with gaps.
+    let agg: (Candle & { span: number }) | null = null;
+    const flush = (cd: Candle & { span: number }) => {
+      const x = tToX(cd.t + cd.span / 2);
+      const bodyW = Math.max(1, (cd.span / DAY) * pxPerDay * 0.62);
       const up = cd.c >= cd.o;
       ctx.strokeStyle = up ? C.candleUp : C.candleDown;
       ctx.fillStyle = up ? C.bg : C.candleDown;
@@ -639,11 +641,12 @@ export function Chart(props: Props) {
     };
     for (let i = i0; i < candles.length; i++) {
       const cd = candles[i];
-      const b = Math.floor(cd.t / bucket) * bucket;
-      if (!agg || b !== bStart) {
+      const own = i + 1 < candles.length ? candles[i + 1].t - cd.t : HOUR;
+      const span = Math.max(bucket, own);
+      const b = Math.floor(cd.t / span) * span;
+      if (!agg || b >= agg.t + agg.span || own > agg.span) {
         if (agg) flush(agg);
-        bStart = b;
-        agg = { t: b, o: cd.o, h: cd.h, l: cd.l, c: cd.c };
+        agg = { t: b, o: cd.o, h: cd.h, l: cd.l, c: cd.c, span };
       } else {
         agg.h = Math.max(agg.h, cd.h);
         agg.l = Math.min(agg.l, cd.l);
