@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "check:chart": "vite build && node scripts/check-chart.mjs",
     "check:live": "node scripts/check-live.mjs",
-    "check:draw": "vite build && node scripts/check-draw.mjs"
+    "check:draw": "vite build && node scripts/check-draw.mjs",
+    "check:easy": "vite build && node scripts/check-easy.mjs"
   },
   "dependencies": {
     "@derivexyz/derive-ts": "^3.0.25",

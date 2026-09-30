@@ -1,3 +1,4 @@
+import type { BetInfo } from './binary';
 import { bsGreeks, bsPrice, normCdf, type Greeks, type OptType } from './bs';
 import type { Market } from '../data/types';
 import { DAY, YEAR, expiryLabel, type Asset } from './market';
@@ -23,6 +24,8 @@ export interface Position {
   legs: Leg[];
   openedAt: number;
   openSpot: number;
+  /** Set for easy-mode Yes bets: the question and shares behind the legs. */
+  bet?: BetInfo;
 }
 
 export interface ClosedPosition {

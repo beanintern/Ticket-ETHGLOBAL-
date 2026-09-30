@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import type { OptType } from '../lib/bs';
-import { bsPrice } from '../lib/bs';
+import { bsPrice, normCdf } from '../lib/bs';
 import { compactUsd, price as fmtPrice, signedUsd } from '../lib/format';
 import {
   DAY,
@@ -11,6 +11,7 @@ import {
   type MarketSpec,
 } from '../lib/market';
 import type { Market } from '../data/types';
+import { beyondProbability, betQuestion, type BetQuote } from '../lib/binary';
 import type { PathPoint } from '../lib/pathfit';
 import { buildModel, lifetimeExtremes, type Leg, type Model, type Side } from '../lib/strategy';
 
@@ -60,6 +61,18 @@ interface Props {
   onDraw: (path: PathPoint[]) => void;
   /** The last drawn path, shown dashed while its fitted position is on the chart. */
   guide: PathPoint[] | null;
+  /** Easy mode: click above/below the price to pick a Yes bet; the idle map is a probability cone. */
+  easy?: EasyLayer | null;
+}
+
+export interface EasyLayer {
+  /** The bet a click at this listed expiry and price would make. */
+  quote: (expiry: number, price: number) => BetQuote | null;
+  onPick: (expiry: number, price: number) => void;
+  /** The bet being set up (drawn as a ring). */
+  pending: BetQuote | null;
+  /** Placed bets, drawn as pills with their current price. */
+  bets: { id: string; expiry: number; level: number; dir: 'above' | 'below'; label: string; up: boolean }[];
 }
 
 const C = {
@@ -215,6 +228,8 @@ export function Chart(props: Props) {
   const geomRef = useRef<Geom | null>(null);
   const lastMoveRef = useRef(0);
   const zoomRef = useRef<{ horizon: number; yZoom: number; raf: number; cur: ChartView; sent: ChartView[] } | null>(null);
+  /** Easy mode's probability cone, drawn once per view and price. */
+  const coneRef = useRef<{ key: string; canvas: HTMLCanvasElement } | null>(null);
   /** Traced max profit / loss outlines, reused until the map (legs, view, prices) changes. */
   const zoneCacheRef = useRef<Map<string, ZoneTrace>>(new Map());
   const heatRef = useRef<{
@@ -376,6 +391,82 @@ export function Chart(props: Props) {
     const cols = Math.max(0, Math.ceil((heatR - hx0) / cell));
     const rows = Math.ceil((plotB - plotT) / cell);
     let maxAbs = 0;
+    // Easy mode with nothing selected: the probability cone. Each point is shaded by the implied
+    // chance the price finishes beyond it by then (above it if it's above spot, below if below).
+    if (p.easy && !legsForPnl.length && cols > 0 && rows > 0) {
+      const key = ['cone', spot.toFixed(2), Math.floor(now / 30000), w, h, g.lo.toFixed(3), g.hi.toFixed(3), view.horizon, hx0.toFixed(1), cell].join('#');
+      if (!coneRef.current || coneRef.current.key !== key) {
+        const off = coneRef.current?.canvas ?? document.createElement('canvas');
+        off.width = cols;
+        off.height = rows;
+        const octx = off.getContext('2d')!;
+        const img = octx.createImageData(cols, rows);
+        for (let c = 0; c < cols; c++) {
+          const t = xToT(hx0 + (c + 0.5) * cell);
+          const T = (t - now) / YEAR;
+          const atm = market.iv('C', spot, t, now);
+          for (let r = 0; r < rows; r++) {
+            const S = yToP(plotT + (r + 0.5) * cell);
+            const pr = beyondProbability(spot, S, T, atm);
+            const rgb = S >= spot ? C.profit : C.loss;
+            const i = (r * cols + c) * 4;
+            img.data[i] = rgb[0];
+            img.data[i + 1] = rgb[1];
+            img.data[i + 2] = rgb[2];
+            img.data[i + 3] = Math.round(255 * (0.03 + 0.6 * Math.pow(Math.min(1, 2 * pr), 1.3)));
+          }
+        }
+        octx.putImageData(img, 0, 0);
+        coneRef.current = { key, canvas: off };
+      }
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(hx0, plotT, heatR - hx0, plotB - plotT);
+      ctx.clip();
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(coneRef.current.canvas, hx0, plotT, cols * cell, rows * cell);
+      // Dashed lines where the chance of getting beyond is 25% and 10%, so the cone reads as numbers.
+      const zOf = (pr: number) => {
+        let a = -8;
+        let b = 0;
+        for (let i = 0; i < 50; i++) {
+          const m = (a + b) / 2;
+          if (normCdf(m) < pr) a = m;
+          else b = m;
+        }
+        return (a + b) / 2;
+      };
+      ctx.font = `600 10px ${MONO}`;
+      ctx.textBaseline = 'middle';
+      for (const pr of [0.25, 0.1]) {
+        const z = zOf(pr);
+        for (const up of [true, false]) {
+          const rgb = up ? C.profit : C.loss;
+          ctx.strokeStyle = `rgba(${rgb.join(',')},0.55)`;
+          ctx.setLineDash([3, 4]);
+          ctx.beginPath();
+          let last: [number, number] | null = null;
+          for (let x = hx0 + 2; x <= plotR; x += 3) {
+            const t = xToT(x);
+            const T = (t - now) / YEAR;
+            const sq = market.iv('C', spot, t, now) * Math.sqrt(T);
+            const S = spot * Math.exp((up ? -z : z) * sq - 0.5 * sq * sq);
+            const y = pToY(S);
+            if (!last) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+            last = [x, y];
+          }
+          ctx.stroke();
+          ctx.setLineDash([]);
+          if (last && last[1] > plotT + 8 && last[1] < plotB - 8) {
+            ctx.fillStyle = `rgb(${rgb.join(',')})`;
+            ctx.textAlign = 'right';
+            ctx.fillText(`${Math.round(pr * 100)}%`, plotR - 4, last[1] + (up ? -8 : 8));
+          }
+        }
+      }
+      ctx.restore();
+    }
     if (legsForPnl.length && cols > 0 && rows > 0) {
       const key = [
         legsForPnl.map((l) => `${l.type}${l.side}${l.strike}@${l.expiry}x${l.qty}`).join('|'),
@@ -546,7 +637,7 @@ export function Chart(props: Props) {
     }
 
     // ---- Expiry columns ----
-    const snap = hover && isLegTool(tool) && !drag ? snapAt(g, hover.x, hover.y) : null;
+    const snap = hover && (isLegTool(tool) || p.easy) && !drag ? snapAt(g, hover.x, hover.y) : null;
     const activeExpiry = dragLeg?.expiry ?? snap?.expiry;
     const legExpiries = new Set(legs.map((l) => l.expiry));
     const visible = expiries.filter((e) => tToX(e.ts) <= plotR);
@@ -1331,6 +1422,75 @@ export function Chart(props: Props) {
     // ---- Ghost for the active tool ----
     const overMarker = hover && markers.find((m) => hover.x >= m.x && hover.x <= m.x + m.w && hover.y >= m.y && hover.y <= m.y + m.h);
     let ghostInfo: string[] | null = null;
+    // Easy mode: the Yes bet a click here would make, on the nearest listed expiry.
+    let easyInfo: { q: BetQuote; x: number; y: number } | null = null;
+    if (p.easy && snap && hover && !overMarker) {
+      const q = p.easy.quote(snap.expiry, yToP(hover.y));
+      if (q) easyInfo = { q, x: Math.min(tToX(q.expiry), plotR - 2), y: pToY(q.level) };
+    }
+    // Easy mode: placed bets as pills showing their price now, and the one being set up as a ring.
+    if (p.easy) {
+      ctx.font = `600 11px ${MONO}`;
+      for (const b of p.easy.bets) {
+        const bx = Math.min(tToX(b.expiry), plotR - 2);
+        const by = pToY(b.level);
+        if (by < plotT || by > plotB) continue;
+        const col = b.dir === 'above' ? `rgb(${C.profit.join(',')})` : `rgb(${C.loss.join(',')})`;
+        const tw = ctx.measureText(b.label).width + 22;
+        const tx = Math.min(plotR - tw - 2, bx + 8);
+        roundRect(ctx, tx, by - 10, tw, 20, 10);
+        ctx.fillStyle = 'rgba(17,21,28,0.92)';
+        ctx.fill();
+        ctx.strokeStyle = col;
+        ctx.stroke();
+        ctx.fillStyle = col;
+        ctx.beginPath();
+        const ax = tx + 9;
+        if (b.dir === 'above') {
+          ctx.moveTo(ax - 4, by + 3);
+          ctx.lineTo(ax + 4, by + 3);
+          ctx.lineTo(ax, by - 4);
+        } else {
+          ctx.moveTo(ax - 4, by - 3);
+          ctx.lineTo(ax + 4, by - 3);
+          ctx.lineTo(ax, by + 4);
+        }
+        ctx.fill();
+        ctx.fillStyle = b.up ? `rgb(${C.profit.join(',')})` : C.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(b.label, tx + 16, by + 0.5);
+        ctx.beginPath();
+        ctx.arc(bx, by, 4, 0, Math.PI * 2);
+        ctx.fillStyle = col;
+        ctx.fill();
+      }
+      const ring = (q: BetQuote, solid: boolean) => {
+        const rx = Math.min(tToX(q.expiry), plotR - 2);
+        const ry = pToY(q.level);
+        const col = q.dir === 'above' ? `rgb(${C.profit.join(',')})` : `rgb(${C.loss.join(',')})`;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2;
+        if (!solid) ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.arc(rx, ry, 8, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.lineWidth = 1;
+        // The price level, back to now.
+        ctx.strokeStyle = col;
+        ctx.globalAlpha = 0.5;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(nowX, ry);
+        ctx.lineTo(rx - 8, ry);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+      };
+      if (p.easy.pending) ring(p.easy.pending, true);
+      if (easyInfo) ring(easyInfo.q, false);
+    }
     if (snap && isLegTool(tool) && !overMarker) {
       const tl = TOOL_LEG[tool];
       const ghost: Leg = { id: '__ghost', asset: spec.asset, type: tl.type, side: tl.side, strike: snap.strike, expiry: snap.expiry, qty: 1 };
@@ -1395,6 +1555,26 @@ export function Chart(props: Props) {
         ctx.lineTo(x, plotB);
         ctx.stroke();
       }
+    } else if (p.easy) {
+      // Easy mode: the chance of ending beyond each price by the time under the cursor (or the
+      // right edge), the cone's cross-section.
+      const tProf = snap?.expiry ?? xToT(plotR);
+      const T = (tProf - now) / YEAR;
+      const atm = market.iv('C', spot, tProf, now);
+      const half = PW - 12;
+      for (let y = plotT + 30; y <= plotB; y += 2) {
+        const S = yToP(y);
+        const pr = beyondProbability(spot, S, T, atm);
+        const rgb = S >= spot ? C.profit : C.loss;
+        ctx.fillStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.75)`;
+        ctx.fillRect(gx0 + 6, y, 2 * pr * half, 2);
+      }
+      ctx.font = `600 9px ${MONO}`;
+      ctx.fillStyle = C.muted;
+      ctx.textAlign = 'center';
+      ctx.fillText('CHANCE BY', gx0 + PW / 2, plotT + 10);
+      ctx.fillStyle = C.text;
+      ctx.fillText(fmtTime(tProf, false), gx0 + PW / 2, plotT + 22);
     } else {
       ctx.font = `600 9px ${MONO}`;
       ctx.fillStyle = C.dim;
@@ -1443,7 +1623,14 @@ export function Chart(props: Props) {
           lines.push({ text: ghostInfo[0], bold: true, color: TOOL_LEG[tool as LegTool].side > 0 ? C.long : C.short });
           lines.push({ text: ghostInfo[1] });
         }
-        lines.push({ text: `${fmtTime(ht, true)} UTC · ${fmtPrice(hp, hp < 100 ? 2 : 0)}`, color: C.muted });
+        if (easyInfo) {
+          const { q } = easyInfo;
+          const col = q.dir === 'above' ? `rgb(${C.profit.join(',')})` : `rgb(${C.loss.join(',')})`;
+          lines.push({ text: `${betQuestion(spec.asset, q.dir, q.level)} on ${fmtTime(q.expiry, false)}?`, bold: true, color: col });
+          lines.push({ text: `Yes ${Math.round(q.price * 100)}¢ · ${Math.round(q.price * 100)}% chance · pays $1`, bold: true });
+          lines.push({ text: 'Click to bet', color: C.muted });
+        }
+        if (!easyInfo) lines.push({ text: `${fmtTime(ht, true)} UTC · ${fmtPrice(hp, hp < 100 ? 2 : 0)}`, color: C.muted });
         if (legsForPnl.length) {
           const v = pnlFn(hp, ht);
           lines.push({ text: `Position P&L ${signedUsd(v)}`, bold: true, color: v >= 0 ? `rgb(${C.profit.join(',')})` : `rgb(${C.loss.join(',')})` });
@@ -1486,7 +1673,7 @@ export function Chart(props: Props) {
     else if (tool === 'pointer' && hover && hover.x < plotR) cursor = overMarker ? 'grab' : 'move';
     else if (overMarker) cursor = 'grab';
     else if (hover && hover.x > plotR + PW) cursor = 'ns-resize';
-    else if (snap && isLegTool(tool)) cursor = 'crosshair';
+    else if (snap && (isLegTool(tool) || p.easy)) cursor = 'crosshair';
     else if (tool === 'draw' && hover && hover.x > nowX && hover.x < plotR) cursor = 'crosshair';
     canvas.style.cursor = cursor;
 
@@ -1506,6 +1693,7 @@ export function Chart(props: Props) {
         legs: legsForPnl.map((l) => ({ id: l.id, type: l.type, side: l.side, strike: l.strike, expiry: l.expiry, qty: l.qty, entry: l.entry })),
         markers: markers.map((m) => ({ id: m.id, x: m.x + m.w / 2, y: m.y + m.h / 2 })),
         guide: p.guide,
+        easyHover: easyInfo ? { ...easyInfo.q } : null,
         heat: heat && maxAbs > 1e-9 ? { x0: heat.x0, cell: heat.cell, cols: heat.cols, rows: heat.rows, contour: heat.contour } : null,
         pnl: pnlFn,
         draw,
@@ -1778,6 +1966,11 @@ export function Chart(props: Props) {
   /** Click / tap on empty chart: place a leg with the active tool, or clear the selection. */
   const act = (g: Geom, x: number, y: number) => {
     const p = propsRef.current;
+    if (p.easy) {
+      const s = snapAt(g, x, y);
+      if (s) p.easy.onPick(s.expiry, g.yToP(y));
+      return;
+    }
     if (!isLegTool(p.tool)) {
       p.onSelect(null);
       return;

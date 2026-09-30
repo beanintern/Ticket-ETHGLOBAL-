@@ -6,13 +6,15 @@ import type { Trading } from './components/DeriveReview';
 import { AccountButton, AccountPanel } from './components/AccountPanel';
 import { Chart, TOOL_LEG, type ChartView, type LegTool, type Tool } from './components/Chart';
 import { fitPath, payoffAlongPath, type PathPoint } from './lib/pathfit';
+import { betLegs, betQuestion, quoteBet, type BetQuote } from './lib/binary';
+import { EasyPanel, sharePrice } from './components/EasyPanel';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
 import { bsPrice } from './lib/bs';
 import { price as fmtPrice, signed, signedUsd } from './lib/format';
 import { createSource, pickSourceKind } from './data';
 import type { Market, MarketSource } from './data/types';
-import { DAY, HOUR, MARKETS, YEAR, priceAt, type Asset } from './lib/market';
+import { DAY, HOUR, MARKETS, YEAR, expiryLabel, priceAt, type Asset } from './lib/market';
 import {
   buildModel,
   describe,
@@ -211,6 +213,27 @@ export default function App() {
   const [closed, setClosed] = useState<ClosedPosition[]>(() => loadStore(source.kind)?.closed ?? []);
   const [focus, setFocus] = useState<Focus>({ kind: 'builder' });
   const [tab, setTab] = useState<'build' | 'positions'>('build');
+  // Easy mode: prediction-market style Yes bets instead of the full options ticket.
+  const [mode, setModeState] = useState<'easy' | 'pro'>(() => {
+    const q = new URLSearchParams(location.search).get('mode');
+    if (q === 'easy' || q === 'pro') return q;
+    try {
+      return localStorage.getItem('ticket.mode') === 'easy' ? 'easy' : 'pro';
+    } catch {
+      return 'pro';
+    }
+  });
+  const setMode = (m: 'easy' | 'pro') => {
+    setModeState(m);
+    try {
+      localStorage.setItem('ticket.mode', m);
+    } catch {
+      /* not remembered */
+    }
+  };
+  const easy = mode === 'easy';
+  const [pick, setPick] = useState<{ asset: Asset; expiry: number; price: number } | null>(null);
+  const [stake, setStake] = useState(20);
   // Positions ticked in the Positions tab: their legs are added to the chart's P&L map (with the
   // ticket being built), so their exposure compounds.
   const [compound, setCompound] = useState<Set<string>>(() => new Set());
@@ -336,8 +359,50 @@ export default function App() {
       }
       return next;
     });
-  const chartLegs = [...staticLegs, ...editableLegs];
+  // Easy mode: the chart shows the bet being set up (its payoff map), or the probability cone.
+  const pendingBet: BetQuote | null = easy && pick && pick.asset === asset ? quoteBet(market, asset, pick.expiry, pick.price, now) : null;
+  const easyLegs = pendingBet ? betLegs(pendingBet, stake / pendingBet.price) : [];
+  const chartLegs = easy ? easyLegs : [...staticLegs, ...editableLegs];
   const chartModel = buildModel(chartLegs, market, now);
+  const bets = positions.filter((p) => p.bet);
+  const buyBet = (q: BetQuote, amount: number) => {
+    const shares = amount / q.price;
+    const legs = betLegs(q, shares);
+    const m = buildModel(legs, markets[q.asset], now);
+    const pos: Position = {
+      id: newId('pos'),
+      asset: q.asset,
+      name: `${betQuestion(q.asset, q.dir, q.level)} · ${expiryLabel(q.expiry)}`,
+      legs: legs.map((l, i) => ({ ...l, entry: m.marks[i] })),
+      openedAt: now,
+      openSpot: markets[q.asset].spot,
+      // What was actually paid per share (the legs at mark), which is the quote.
+      bet: { dir: q.dir, level: q.level, lo: q.lo, hi: q.hi, expiry: q.expiry, shares, entry: m.cost / shares },
+    };
+    setPositions((ps) => [pos, ...ps]);
+    setPick(null);
+    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${Math.round((m.cost / shares) * 100)}¢: ${pos.name} (paper)`);
+  };
+  const easyLayer = easy
+    ? {
+        quote: (expiry: number, price: number) => quoteBet(market, asset, expiry, price, now),
+        onPick: (expiry: number, price: number) => setPick({ asset, expiry, price }),
+        pending: pendingBet,
+        bets: bets
+          .filter((b) => b.asset === asset && b.bet!.expiry > now)
+          .map((b) => {
+            const px = sharePrice(b, markets, now);
+            return {
+              id: b.id,
+              expiry: b.bet!.expiry,
+              level: b.bet!.level,
+              dir: b.bet!.dir,
+              label: `${Math.round(b.bet!.entry * 100)}¢ → ${Math.round(px * 100)}¢`,
+              up: px > b.bet!.entry,
+            };
+          }),
+      }
+    : null;
   const builderModel = buildModel(builderLegs, market, now);
 
   // Undo / redo for ticket edits. Each entry is the whole builder plus the market it was edited on.
@@ -627,6 +692,14 @@ export default function App() {
             <span className="num">{(atmIv * 100).toFixed(1)}%</span>
           </div>
         </div>
+        <div className="seg mode-seg" role="group" aria-label="Mode">
+          <button className={easy ? 'is-active' : ''} onClick={() => setMode('easy')} title="Prediction-market style: tap above or below the price">
+            Easy
+          </button>
+          <button className={!easy ? 'is-active' : ''} onClick={() => setMode('pro')} title="The full options ticket">
+            Pro
+          </button>
+        </div>
         <SourceSwitch source={source} />
         {accountEnabled && <AccountButton account={accountState} onOpen={() => setAccountOpen(true)} />}
       </header>
@@ -646,6 +719,12 @@ export default function App() {
       <main className="workspace">
         <section className="chart-panel" aria-label="Chart">
           <div className="chart-toolbar">
+            {easy ? (
+              <div className="easy-hint">
+                <span className="up">▲ Tap above the price</span> to bet it ends higher · <span className="down">▼ below</span> to bet lower
+              </div>
+            ) : (
+            <>
             <div className="tools" role="toolbar" aria-label="Leg tools">
               <button className={`tool ${tool === 'pointer' ? 'is-active' : ''}`} onClick={() => setTool('pointer')} title="Select and drag (V)">
                 <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
@@ -692,8 +771,10 @@ export default function App() {
                 </svg>
               </button>
             </div>
+            </>
+            )}
             <div className="chart-controls">
-              {focusedPosition ? (
+              {easy ? null : focusedPosition ? (
                 <button className="focus-chip" onClick={() => setFocus({ kind: 'builder' })}>
                   Viewing {focusedPosition.name} <span aria-hidden="true">✕</span>
                 </button>
@@ -740,10 +821,10 @@ export default function App() {
             spot={spot}
             now={now}
             expiries={expiries}
-            editableLegs={editableLegs}
-            staticLegs={staticLegs}
+            editableLegs={easy ? [] : editableLegs}
+            staticLegs={easy ? easyLegs : staticLegs}
             model={chartModel}
-            tool={focusedPosition ? 'pointer' : tool}
+            tool={focusedPosition || easy ? 'pointer' : tool}
             selectedLegId={selectedLegId}
             view={view}
             onViewChange={setView}
@@ -751,7 +832,8 @@ export default function App() {
             onMove={onMove}
             onMoveGroup={onMoveGroup}
             onDraw={onDraw}
-            guide={!focusedPosition && builderLegs.length ? (guides[asset] ?? null) : null}
+            easy={easyLayer}
+            guide={!easy && !focusedPosition && builderLegs.length ? (guides[asset] ?? null) : null}
             onSelect={setSelectedLegId}
             onRemove={(id) => {
               const leg = builderLegs.find((l) => l.id === id);
@@ -760,6 +842,31 @@ export default function App() {
             }}
           />
           <div className="chart-legend">
+            {easy ? (
+              pendingBet ? (
+                <>
+                  <span>
+                    <i className="sw sw-profit" /> You win
+                  </span>
+                  <span>
+                    <i className="sw sw-loss" /> You lose
+                  </span>
+                  <span className="hint">Shown for your {`$${stake}`} bet · click elsewhere on the chart to pick a different one</span>
+                </>
+              ) : (
+                <>
+                  <span>
+                    <i className="sw sw-profit" /> Above today's price
+                  </span>
+                  <span>
+                    <i className="sw sw-loss" /> Below today's price
+                  </span>
+                  <span className="hint">Brighter = more likely to get there by that date · hover for the chance · drag to pan · scroll to zoom</span>
+                  <span className="hint-touch">Brighter = more likely · tap to bet · swipe sideways to pan</span>
+                </>
+              )
+            ) : (
+              <>
             <span>
               <i className="sw sw-profit" /> Profit
             </span>
@@ -779,9 +886,25 @@ export default function App() {
             <span className="hint">
               Click to add a leg · drag the chart to pan · drag legs to move · right-click to remove · scroll to zoom, shift-scroll for price · double-click to reset
             </span>
+              </>
+            )}
           </div>
         </section>
 
+        {easy ? (
+          <EasyPanel
+            asset={asset}
+            now={now}
+            markets={markets}
+            pending={pendingBet}
+            stake={stake}
+            onStake={setStake}
+            onCancel={() => setPick(null)}
+            onBuy={buyBet}
+            bets={bets}
+            onSell={closePosition}
+          />
+        ) : (
         <Sidebar
           tab={tab}
           onTab={setTab}
@@ -827,6 +950,7 @@ export default function App() {
           }}
           onClosePosition={closePosition}
         />
+        )}
       </main>
       {toast && (
         <div className="toast" role="status">
