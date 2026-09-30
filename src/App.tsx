@@ -232,7 +232,7 @@ export default function App() {
     }
   };
   const easy = mode === 'easy';
-  const [pick, setPick] = useState<{ asset: Asset; expiry: number; price: number } | null>(null);
+  const [pick, setPick] = useState<{ asset: Asset; expiry: number; lo: number; hi: number } | null>(null);
   const [stake, setStake] = useState(20);
   // Positions ticked in the Positions tab: their legs are added to the chart's P&L map (with the
   // ticket being built), so their exposure compounds.
@@ -359,10 +359,10 @@ export default function App() {
       }
       return next;
     });
-  // Easy mode: the chart shows the bet being set up (its payoff map), or the probability cone.
-  const pendingBet: BetQuote | null = easy && pick && pick.asset === asset ? quoteBet(market, asset, pick.expiry, pick.price, now) : null;
-  const easyLegs = pendingBet ? betLegs(pendingBet, stake / pendingBet.price) : [];
-  const chartLegs = easy ? easyLegs : [...staticLegs, ...editableLegs];
+  // Easy mode: the chart is a grid of bets (no payoff map); the picked box is the bet being set up.
+  const pendingBet: BetQuote | null =
+    easy && pick && pick.asset === asset ? quoteBet(market, asset, pick.expiry, pick.lo, now, { lo: pick.lo, hi: pick.hi }) : null;
+  const chartLegs = easy ? [] : [...staticLegs, ...editableLegs];
   const chartModel = buildModel(chartLegs, market, now);
   const bets = positions.filter((p) => p.bet);
   const buyBet = (q: BetQuote, amount: number) => {
@@ -385,8 +385,8 @@ export default function App() {
   };
   const easyLayer = easy
     ? {
-        quote: (expiry: number, price: number) => quoteBet(market, asset, expiry, price, now),
-        onPick: (expiry: number, price: number) => setPick({ asset, expiry, price }),
+        quote: (expiry: number, lo: number, hi: number) => quoteBet(market, asset, expiry, lo, now, { lo, hi }),
+        onPick: (expiry: number, lo: number, hi: number) => setPick({ asset, expiry, lo, hi }),
         pending: pendingBet,
         bets: bets
           .filter((b) => b.asset === asset && b.bet!.expiry > now)
@@ -395,9 +395,10 @@ export default function App() {
             return {
               id: b.id,
               expiry: b.bet!.expiry,
-              level: b.bet!.level,
+              lo: b.bet!.lo,
+              hi: b.bet!.hi,
               dir: b.bet!.dir,
-              label: `${Math.round(b.bet!.entry * 100)}¢ → ${Math.round(px * 100)}¢`,
+              label: `$${(b.bet!.entry * b.bet!.shares).toFixed(0)} → $${(px * b.bet!.shares).toFixed(0)}`,
               up: px > b.bet!.entry,
             };
           }),
@@ -691,6 +692,7 @@ export default function App() {
       spot: (a: Asset) => markets[a].spot,
       specs: MARKETS,
       expiries: (a: Asset = 'ETH') => markets[a].expiries.map((e) => e.ts),
+      strikes: (a: Asset, expiry: number) => markets[a].strikes(expiry),
     };
   }, [markets]);
 
@@ -891,7 +893,7 @@ export default function App() {
             now={now}
             expiries={expiries}
             editableLegs={easy ? [] : editableLegs}
-            staticLegs={easy ? easyLegs : staticLegs}
+            staticLegs={easy ? [] : staticLegs}
             model={chartModel}
             tool={focusedPosition || easy ? 'pointer' : tool}
             selectedLegId={selectedLegId}
@@ -912,28 +914,16 @@ export default function App() {
           />
           <div className="chart-legend">
             {easy ? (
-              pendingBet ? (
-                <>
-                  <span>
-                    <i className="sw sw-profit" /> You win
-                  </span>
-                  <span>
-                    <i className="sw sw-loss" /> You lose
-                  </span>
-                  <span className="hint">Shown for your {`$${stake}`} bet · click elsewhere on the chart to pick a different one</span>
-                </>
-              ) : (
-                <>
-                  <span>
-                    <i className="sw sw-profit" /> Above today's price
-                  </span>
-                  <span>
-                    <i className="sw sw-loss" /> Below today's price
-                  </span>
-                  <span className="hint">Brighter = more likely to get there by that date · hover for the chance · drag to pan · scroll to zoom</span>
-                  <span className="hint-touch">Brighter = more likely · tap to bet · swipe sideways to pan</span>
-                </>
-              )
+              <>
+                <span>
+                  <i className="sw sw-profit" /> Ends above
+                </span>
+                <span>
+                  <i className="sw sw-loss" /> Ends below
+                </span>
+                <span className="hint">Each box pays its multiplier if the price ends past it on that date · drag to pan · scroll to zoom</span>
+                <span className="hint-touch">Tap a box to bet · it pays its multiplier if the price ends past it</span>
+              </>
             ) : (
               <>
             <span>

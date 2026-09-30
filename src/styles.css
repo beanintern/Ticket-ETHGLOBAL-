@@ -411,3 +411,9 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .live-cost b { font-size: 18px; }
 .live-cost .fine { font-size: 11px; }
 .venue-tag { margin-left: 6px; padding: 1px 6px; border-radius: 4px; font: 600 10px var(--mono); color: var(--long); background: rgba(111,168,255,0.12); vertical-align: 1px; }
+.underlying-btn { width: 100%; height: 34px; }
+.underlying { display: grid; gap: 8px; padding: 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line-2); }
+.underlying table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.underlying td { padding: 3px 0; }
+.underlying td:first-child { width: 38px; font-weight: 600; }
+.underlying td:last-child { text-align: right; }

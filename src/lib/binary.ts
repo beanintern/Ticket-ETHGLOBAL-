@@ -37,16 +37,25 @@ export interface BetInfo {
   entry: number;
 }
 
-/** Bets above the current index are "above", below it "below". */
-export function quoteBet(market: Market, asset: Asset, expiry: number, price: number, now: number): BetQuote | null {
+/**
+ * The bet for a price (or an explicit band of listed strikes, e.g. one box of the easy-mode grid).
+ * Bets above the current index are "above", below it "below".
+ */
+export function quoteBet(market: Market, asset: Asset, expiry: number, price: number, now: number, band?: { lo: number; hi: number }): BetQuote | null {
   if (expiry <= now || !(price > 0)) return null;
   const spot = market.spot;
-  const dir: BetDir = price >= spot ? 'above' : 'below';
-  // The two listed strikes either side of the clicked price.
-  const snapped = market.snapStrike(price, expiry);
-  const lo = snapped <= price ? snapped : market.stepStrike(snapped, expiry, -1);
-  const hi = market.stepStrike(lo, expiry, 1);
-  if (!(hi > lo)) return null;
+  let lo: number;
+  let hi: number;
+  if (band) {
+    ({ lo, hi } = band);
+  } else {
+    // The two listed strikes either side of the clicked price.
+    const snapped = market.snapStrike(price, expiry);
+    lo = snapped <= price ? snapped : market.stepStrike(snapped, expiry, -1);
+    hi = market.stepStrike(lo, expiry, 1);
+  }
+  if (!(hi > lo) || lo <= 0) return null;
+  const dir: BetDir = (lo + hi) / 2 >= spot ? 'above' : 'below';
   const T = (expiry - now) / YEAR;
   const w = hi - lo;
   const value =
@@ -81,6 +90,10 @@ export function beyondProbability(spot: number, S: number, T: number, iv: number
   const d2 = (Math.log(spot / S) - 0.5 * sq * sq) / sq;
   return S >= spot ? normCdf(d2) : normCdf(-d2);
 }
+
+/** Payout per $1 staked at a share price (0–1): Euphoria-style multiplier, capped at 100x. */
+export const multiplier = (price: number) => Math.min(100, 1 / Math.max(price, 0.01));
+export const fmtMultiplier = (m: number) => (m >= 99.95 ? '100x' : m >= 10 ? `${m.toFixed(1)}x` : `${m.toFixed(2)}x`);
 
 export const betQuestion = (asset: Asset, dir: BetDir, level: number) => `${asset} ${dir} $${Math.round(level).toLocaleString('en-US')}`;
 

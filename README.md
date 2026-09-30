@@ -64,7 +64,7 @@ SEED=7 ONLY=113 npm run check:chart   # replay one case
 npm run check:live    # the live Derive layer against the real exchange
 NETWORK=testnet npm run check:live
 npm run check:draw    # draws paths with the mouse and checks the position built from each
-npm run check:easy    # Easy mode bets: question, price vs independent pricing, $1 payout
+npm run check:easy    # Easy mode grid: boxes, multipliers vs independent pricing, $1 payout
 ```
 
 - `check:chart` checks named structures (spreads, condors, butterflies, calendars, single
@@ -79,10 +79,11 @@ npm run check:easy    # Easy mode bets: question, price vs independent pricing, 
   butterflies on listed strikes and expiries, that at each butterfly's expiry the legs still
   alive then pay most within half a wing of the path (independent pricing), that the path is
   shown as a guide, and that undo restores the previous ticket.
-- `check:easy` clicks above and below the price across assets, dates and zooms, and checks the
-  question (direction, expiry under the click, strikes around it), that the price in cents
-  equals an independent spread valuation, that each share's legs pay exactly $1 / $0 / 50¢, that
-  a $X bet costs $X, and that bets list and sell.
+- `check:easy` checks the whole grid across assets and zooms (no overlapping boxes, columns
+  ending on their expiries, edges on listed strikes, the right direction, and every box's
+  multiplier against an independent spread valuation), then bets on boxes above and below the
+  price: the card's multiplier, the underlying positions listed, that $X costs $X, that shares
+  pay exactly $1 / $0 / 50¢, and that bets list and sell.
 - `check:live` loads real Derive data with the app's own code and checks expiries, strikes,
   the index and history, that our pricing reproduces Derive's mark prices (within 0.5%), and
   that IV for unlisted strikes is interpolated sensibly.
@@ -107,16 +108,18 @@ npm run check:easy    # Easy mode bets: question, price vs independent pricing, 
 - **Positions tab**. Paper fills with live P&L, a P&L sparkline since entry, progress toward
   max profit, and close. Stored per data source in the browser.
 - **Easy mode** (`src/lib/binary.ts`, `src/components/EasyPanel.tsx`). The header's Easy / Pro
-  switch (or `?mode=easy`) turns the app into a prediction market. The chart shows a probability
-  cone: each point is shaded by the implied chance the price ends beyond it by then, with dashed
-  25% and 10% lines. Tap above the price to bet it ends higher, below to bet lower: the question
-  is "Will ETH be above $L on <expiry>?" for the listed expiry under the tap, with L halfway
-  between the two listed strikes around it. A Yes share is that tight call (or put) spread,
-  sized so the strike gap is $1: it pays $1 past the far strike, $0 on the losing side and
-  part-way in between, and it costs its price per $1, which is the market-implied probability
-  (so 21¢ = 21% chance). The card shows shares, payout and profit, and the chart switches to the
-  bet's win/lose map. Bets appear on the chart with their price paid and price now, and can be
-  sold any time.
+  switch (or `?mode=easy`) turns the chart into a betting grid, in the style of Euphoria. Columns
+  run from one listed expiry to the next; rows are bands between listed strikes on that expiry
+  (merged until they're tall enough to tap), so boxes differ in size: near-dated strikes are
+  finer. Each box is one bet: above the index, "ends above this band on that date"; below it,
+  "ends below". The box shows its multiplier, what $1 pays if right (1 / price, capped at 100x).
+  Under the hood a bet is a call (or put) spread between the band's strikes, sized so the gap
+  is $1 per share: it pays $1 past the far strike, $0 on the losing side and part-way inside
+  the band, and costs its price per $1, the market-implied probability. The bet card shows the
+  multiplier, chance, shares and payout, and **Show underlying positions** lists the exact
+  options opened (instrument, side, size, price). Placed bets are outlined on their box with
+  what went in and what they're worth now, and can be sold any time. There's no payoff map in
+  Easy mode.
 
   On **Testnet** with a Derive account connected, bets are real orders (test funds). The card
   asks Derive for a dry run of both legs and shows the real price per share (spread and fees

@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import type { OrderPreview } from '../account/derive';
 import type { LegOrder } from '../account/orders';
 import type { Trading } from './DeriveReview';
-import { betCost, betLegs, betQuestion, sharePayoff, type BetQuote } from '../lib/binary';
+import { betCost, betLegs, betQuestion, fmtMultiplier, multiplier, sharePayoff, type BetQuote } from '../lib/binary';
+import { instrumentName } from '../account/orders';
 import { signedUsd, usd } from '../lib/format';
 import { expiryLabel, type Asset } from '../lib/market';
 import { buildModel, type Position } from '../lib/strategy';
@@ -89,6 +90,25 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
   const liveInvalid = liveOk?.previews.find((p) => !p.valid)?.reason ?? null;
   const partial = liveCost && liveCost.shares < liveShares - 1e-9;
   const shares = live ? liveShares : fairShares;
+
+  // The options behind the bet: the exact orders when live, else the legs at their marks.
+  const [showLegs, setShowLegs] = useState(false);
+  const underlying = (() => {
+    if (!pending) return [];
+    if (liveOk)
+      return liveOk.orders.map((o, i) => ({
+        instrument: o.instrument,
+        buy: o.direction === 'buy',
+        amount: o.amount,
+        price: liveOk.previews[i].fillAmount > 0 ? liveOk.previews[i].fillPrice : Number(o.limitPrice),
+      }));
+    const legs = betLegs(pending, fairShares);
+    const marks = buildModel(legs, markets[pending.asset], now).marks;
+    return legs.map((l, i) => ({ instrument: instrumentName(l), buy: l.side > 0, amount: l.qty.toFixed(2), price: marks[i] }));
+  })();
+  const u0Text = pending
+    ? `Each contract is on 1 ${pending.asset}. The two strikes are $${(pending.hi - pending.lo).toLocaleString('en-US')} apart, so ${underlying[0]?.amount ?? '–'} contracts pay up to $${shares.toFixed(2)}: $1 for each of your ${shares.toFixed(1)} shares.`
+    : '';
   // On narrow screens the card sits below the chart: bring it into view when a bet is picked.
   const cardRef = useRef<HTMLDivElement>(null);
   const pickKey = pending ? `${pending.expiry}|${pending.level}` : '';
@@ -108,11 +128,11 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             <div className="eyebrow">Predict {asset}</div>
             <h2>Where will {asset} be?</h2>
             <p>
-              Tap the chart <b className="up">above</b> the price to bet {asset} ends higher, or <b className="down">below</b> to bet it ends lower,
-              on any listed date.
+              Tap a box <b className="up">above</b> the price to bet {asset} ends higher than it, or <b className="down">below</b> to bet it ends lower,
+              on that box's date.
             </p>
             <p className="fine">
-              Each share costs its chance of happening, in cents, and pays <b>$1</b> if you're right. Brighter areas on the chart are more likely.
+              Each box shows what $1 pays if you're right: <b>4.00x</b> means $1 wins $4, and a 1 in 4 chance. Further away and sooner pays more.
             </p>
           </div>
         ) : (
@@ -127,11 +147,11 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               Will {asset} be {pending.dir} ${Math.round(pending.level).toLocaleString('en-US')} on {expiryLabel(pending.expiry)}?
             </h2>
             <div className="bet-price">
-              <span className="num">{cents(pending.price)}</span>
+              <span className="num">{fmtMultiplier(multiplier(pending.price))}</span>
               <span>
-                Yes · {Math.round(pending.price * 100)}% chance
+                {Math.round(pending.price * 100)}% chance · {cents(pending.price)} a share
                 <br />
-                pays $1 per share
+                each share pays $1
               </span>
             </div>
             <label className="bet-stake">
@@ -227,6 +247,33 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 )}
               </>
             )}
+            <button className={`ghost underlying-btn ${showLegs ? 'is-on' : ''}`} onClick={() => setShowLegs((v) => !v)} aria-expanded={showLegs}>
+              {showLegs ? 'Hide' : 'Show'} underlying positions
+            </button>
+            {showLegs && (
+              <div className="underlying">
+                <p className="fine">
+                  This bet is a {pending.dir === 'above' ? 'call' : 'put'} spread on Derive: {live ? 'these orders are sent' : 'these positions are opened (paper)'}{' '}
+                  when you buy.
+                </p>
+                <table>
+                  <tbody>
+                    {underlying.map((u) => (
+                      <tr key={u.instrument}>
+                        <td className={u.buy ? 'long' : 'short'}>{u.buy ? 'Buy' : 'Sell'}</td>
+                        <td className="num">
+                          {u.amount} × {u.instrument}
+                        </td>
+                        <td className="num">{usd(u.price)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="fine">
+                  {u0Text}
+                </p>
+              </div>
+            )}
             <p className="fine">
               {(() => {
                 const [win, lose] = pending.dir === 'above' ? [pending.hi, pending.lo] : [pending.lo, pending.hi];
@@ -264,7 +311,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                   </div>
                   <div className="bet-row fine">
                     <span className="num">
-                      {bet.shares.toFixed(1)} shares · {cents(bet.entry)} → {done ? `settled ${cents(px)}` : cents(px)}
+                      {usd(bet.entry * bet.shares)} in · {done ? 'settled' : 'now'} {usd(px * bet.shares)} · wins {usd(bet.shares)}
                     </span>
                     {!done && (
                       <button className="link" onClick={() => onSell(b.id)}>

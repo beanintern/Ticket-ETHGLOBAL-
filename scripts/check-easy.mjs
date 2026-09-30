@@ -1,20 +1,20 @@
-// Automated check for Easy mode (prediction-market style Yes bets), against an independent
+// Automated check for Easy mode (a grid of prediction-market style bets), against an independent
 // calculation (not the app's own pricing).
 //
 //   npm run check:easy
 //
-// Clicks above and below the price at several dates and zooms, and checks:
-//   1. the question: "above" when clicked above the index, "below" when below, on the listed
-//      expiry under the click, at a level between two listed strikes around the click
-//   2. the price in cents is the spread's value per $1 (independent Black-Scholes on the
-//      simulator's vol surface), and is between 1¢ and 99¢
-//   3. buying $X gives X / price shares whose legs pay exactly $1 per share past the far strike,
-//      $0 on the losing side, and 50¢ at the level (checked leg by leg at expiry)
-//   4. the bet shows on the chart and in the list, and selling it removes it
+// For several assets and zooms it checks the grid, then bets on boxes above and below the price:
+//   1. the grid: boxes never overlap, each column ends exactly on its listed expiry, and every
+//      box edge is a strike listed for that expiry
+//   2. every box: "above" if its band is above the index, "below" if below, and its price (shown
+//      as a multiplier, 1 / price) equals an independent Black-Scholes value of the spread per $1
+//   3. betting on a box: the card shows its multiplier, "Show underlying positions" lists the
+//      two options (right expiry, strikes and sides), buying $X costs $X, and the shares' legs pay
+//      exactly $1 past the far strike, $0 on the losing side and 50¢ at the middle
+//   4. the bet is listed, and selling it removes it
 import { chromium } from 'playwright';
 import { preview } from 'vite';
 
-const DAY = 864e5;
 const server = await preview({ preview: { port: 4182 }, logLevel: 'warn' });
 const url = server.resolvedUrls.local[0];
 const browser = await chromium.launch();
@@ -24,114 +24,135 @@ page.on('pageerror', (e) => pageErrors.push(e.message));
 await page.addInitScript(() => { window.__TICKET_TEST__ = true; try { localStorage.clear(); } catch {} });
 await page.goto(`${url}?source=mock&freeze=1&mode=easy`);
 await page.waitForFunction(() => window.__ticket && window.__chart);
-const box = await page.locator('canvas').first().boundingBox();
+const canvas = await page.locator('canvas').first().boundingBox();
 
-// [asset, horizon days, x as a fraction of the future, price as a multiple of spot, stake]
-const cases = [
-  ['ETH', 21, 0.5, 1.06, 20],
-  ['ETH', 21, 0.3, 0.95, 50],
-  ['ETH', 60, 0.8, 1.2, 10],
-  ['ETH', 7, 0.9, 0.99, 100],
-  ['BTC', 21, 0.6, 1.05, 25],
-  ['BTC', 182, 0.7, 0.8, 40],
-];
-let failed = 0;
-for (const [asset, horizon, fx, mult, stake] of cases) {
-  const failures = [];
-  const fail = (m) => failures.push(m);
-  await page.click(`.market:has-text("${asset}")`);
-  await page.evaluate((h) => window.__ticket.setView({ horizon: h * 864e5, yZoom: 1, yShift: 0 }), horizon);
-  await page.waitForTimeout(250);
-  const [x, y] = await page.evaluate(({ fx, mult }) => {
-    const K = window.__chart;
-    return [K.geom.nowX + fx * (K.geom.plotR - K.geom.nowX), K.pToY(K.spot * mult)];
-  }, { fx, mult });
-  await page.mouse.move(box.x + x, box.y + y);
-  await page.waitForTimeout(150);
-  const res = await page.evaluate(({ x, y, asset }) => {
-    const K = window.__chart;
-    const out = [];
-    const q = K.easyHover;
-    if (!q) return { out: ['no quote under the pointer'] };
-    const clicked = K.yToP(y);
-    const spot = K.spot;
-    // 1. Question.
-    if ((clicked >= spot) !== (q.dir === 'above')) out.push(`clicked ${clicked.toFixed(0)} vs index ${spot.toFixed(0)} but asked "${q.dir}"`);
-    const listed = window.__ticket.expiries(asset);
-    if (!listed.includes(q.expiry)) out.push('expiry not listed');
-    const nearest = listed.filter((e) => K.tToX(e) <= K.geom.plotR + 1).reduce((a, b) => (Math.abs(K.tToX(b) - x) < Math.abs(K.tToX(a) - x) ? b : a));
-    if (q.expiry !== nearest) out.push(`expiry ${new Date(q.expiry).toISOString().slice(5, 10)} isn't the one under the click (${new Date(nearest).toISOString().slice(5, 10)})`);
-    if (!(q.lo <= clicked + 1e-6 && clicked < q.hi)) out.push(`strikes ${q.lo}/${q.hi} don't bracket the click ${clicked.toFixed(0)}`);
-    if (Math.abs(q.level - (q.lo + q.hi) / 2) > 1e-9) out.push('level is not the midpoint');
-    // 2. Price, independently.
-    const YEAR = 365 * 864e5;
-    const normCdf = (v) => {
-      const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
-      const sign = v < 0 ? -1 : 1, z = Math.abs(v) / Math.SQRT2, t = 1 / (1 + p * z);
-      return 0.5 * (1 + sign * (1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-z * z)));
-    };
-    const bs = (type, S, k, T, iv) => {
-      if (T <= 0) return type === 'C' ? Math.max(S - k, 0) : Math.max(k - S, 0);
-      const sq = iv * Math.sqrt(T), d1 = (Math.log(S / k) + 0.5 * sq * sq) / sq, d2 = d1 - sq;
-      return type === 'C' ? S * normCdf(d1) - k * normCdf(d2) : k * normCdf(-d2) - S * normCdf(-d1);
-    };
+// Independent pricing, in the page (mirrors the simulator's vol surface).
+const PRICER = `(() => {
+  const YEAR = 365 * 864e5;
+  const normCdf = (v) => {
+    const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+    const sign = v < 0 ? -1 : 1, z = Math.abs(v) / Math.SQRT2, t = 1 / (1 + p * z);
+    return 0.5 * (1 + sign * (1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-z * z)));
+  };
+  const bs = (type, S, k, T, iv) => {
+    if (T <= 0) return type === 'C' ? Math.max(S - k, 0) : Math.max(k - S, 0);
+    const sq = iv * Math.sqrt(T), d1 = (Math.log(S / k) + 0.5 * sq * sq) / sq, d2 = d1 - sq;
+    return type === 'C' ? S * normCdf(d1) - k * normCdf(d2) : k * normCdf(-d2) - S * normCdf(-d1);
+  };
+  return (asset, spot, now, b) => {
     const baseIv = window.__ticket.specs[asset].baseIv;
     const ivOf = (k, T) => {
       const t = Math.max(T, 1 / (365 * 24));
       const m = Math.max(-2.5, Math.min(2.5, Math.log(k / spot) / Math.sqrt(Math.max(t, 7 / 365))));
       return baseIv * (0.93 + 0.07 * Math.min(1, t * 6)) * (1 + 0.12 * m * m - 0.04 * m);
     };
-    const T = (q.expiry - K.now) / YEAR;
-    const w = q.hi - q.lo;
-    const want = q.dir === 'above'
-      ? (bs('C', spot, q.lo, T, ivOf(q.lo, T)) - bs('C', spot, q.hi, T, ivOf(q.hi, T))) / w
-      : (bs('P', spot, q.hi, T, ivOf(q.hi, T)) - bs('P', spot, q.lo, T, ivOf(q.lo, T))) / w;
-    const clamp = Math.min(0.99, Math.max(0.01, want));
-    if (Math.abs(q.price - clamp) > 0.002) out.push(`price ${(q.price * 100).toFixed(2)}¢, independent ${(clamp * 100).toFixed(2)}¢`);
-    return { out, q };
-  }, { x, y, asset });
-  failures.push(...res.out);
-  if (res.q) {
-    const before = await page.$$eval('.bet-list li', (l) => l.length);
-    await page.mouse.down();
-    await page.mouse.up();
+    const T = (b.expiry - now) / YEAR, w = b.hi - b.lo;
+    const v = b.dir === 'above'
+      ? (bs('C', spot, b.lo, T, ivOf(b.lo, T)) - bs('C', spot, b.hi, T, ivOf(b.hi, T))) / w
+      : (bs('P', spot, b.hi, T, ivOf(b.hi, T)) - bs('P', spot, b.lo, T, ivOf(b.lo, T))) / w;
+    return Math.min(0.99, Math.max(0.01, v));
+  };
+})()`;
+
+// [asset, horizon days, which column (fraction), target chance, stake]
+const cases = [
+  ['ETH', 21, 0.5, 0.2, 20],
+  ['ETH', 21, 0.2, 0.3, 50],
+  ['ETH', 60, 0.9, 0.1, 10],
+  ['ETH', 7, 1, 0.4, 100],
+  ['BTC', 21, 0.6, 0.25, 25],
+  ['BTC', 182, 0.7, 0.15, 40],
+];
+let failed = 0;
+for (const [asset, horizon, colFrac, chance, stake] of cases) {
+  const failures = [];
+  const fail = (m) => failures.push(m);
+  await page.click(`.market:has-text("${asset}")`);
+  await page.evaluate((h) => window.__ticket.setView({ horizon: h * 864e5, yZoom: 1, yShift: 0 }), horizon);
+  await page.waitForTimeout(300);
+  await page.mouse.move(1430, 850);
+  await page.waitForTimeout(100);
+  // 1 + 2: the whole grid.
+  const grid = await page.evaluate(({ asset, PRICER }) => {
+    const K = window.__chart;
+    K.draw();
+    const price = (0, eval)(PRICER);
+    const boxes = K.easyBoxes;
+    const out = [];
+    if (!boxes?.length) return { out: ['no grid'], boxes: [] };
+    for (let i = 0; i < boxes.length; i++) {
+      const b = boxes[i];
+      if (Math.abs(b.x1 - K.tToX(b.expiry)) > 0.5) out.push(`column for ${new Date(b.expiry).toISOString().slice(5, 10)} ends at ${b.x1.toFixed(0)}, expiry is at ${K.tToX(b.expiry).toFixed(0)}`);
+      const ks = window.__ticket.strikes(asset, b.expiry);
+      if (!ks.includes(b.lo) || !ks.includes(b.hi)) out.push(`box ${b.lo}/${b.hi} isn't on listed strikes`);
+      const wantDir = (b.lo + b.hi) / 2 >= K.spot ? 'above' : 'below';
+      if (b.dir !== wantDir) out.push(`box ${b.lo}/${b.hi} is "${b.dir}", its middle is ${wantDir} the index`);
+      const want = price(asset, K.spot, K.now, b);
+      if (Math.abs(b.price - want) > 0.002) out.push(`box ${b.lo}/${b.hi} ${new Date(b.expiry).toISOString().slice(5, 10)}: ${(1 / b.price).toFixed(2)}x, independent ${(1 / want).toFixed(2)}x`);
+      for (let j = i + 1; j < boxes.length; j++) {
+        const c = boxes[j];
+        const xo = Math.min(b.x1, c.x1) - Math.max(b.x0, c.x0);
+        const yo = Math.min(b.y1, c.y1) - Math.max(b.y0, c.y0);
+        if (xo > 0.5 && yo > 0.5) out.push(`boxes ${b.lo}/${b.hi} and ${c.lo}/${c.hi} overlap`);
+      }
+    }
+    return { out: out.slice(0, 6), boxes };
+  }, { asset, PRICER });
+  failures.push(...grid.out);
+  const cols = [...new Set(grid.boxes.map((b) => b.expiry))].sort((a, b) => a - b);
+  const col = cols[Math.min(cols.length - 1, Math.round(colFrac * (cols.length - 1)))];
+  const inCol = grid.boxes.filter((b) => b.expiry === col && b.y0 > 130 && b.y1 < 800);
+  for (const dir of ['above', 'below']) {
+    const pick = inCol.filter((b) => b.dir === dir).sort((a, b) => Math.abs(a.price - chance) - Math.abs(b.price - chance))[0];
+    if (!pick) { fail(`no ${dir} box in the column`); continue; }
+    await page.mouse.click(canvas.x + (pick.x0 + pick.x1) / 2, canvas.y + (pick.y0 + pick.y1) / 2);
     await page.waitForSelector('.bet-card');
-    const shown = await page.textContent('.bet-price .num');
-    if (shown.trim() !== `${Math.round(res.q.price * 100)}¢`) fail(`card shows ${shown}, quote is ${Math.round(res.q.price * 100)}¢`);
+    // 3. Card, underlying positions, purchase.
+    const shown = (await page.textContent('.bet-price .num')).trim();
+    const m = Math.min(100, 1 / pick.price);
+    const want = m >= 99.95 ? '100x' : m >= 10 ? `${m.toFixed(1)}x` : `${m.toFixed(2)}x`;
+    if (shown !== want) fail(`card shows ${shown}, box is ${want}`);
     await page.fill('.stake-input input', String(stake));
+    if ((await page.getAttribute('.underlying-btn', 'aria-expanded')) !== 'true') await page.click('.underlying-btn');
+    const rows = await page.$$eval('.underlying tr', (r) => r.map((x) => x.innerText.replace(/\s+/g, ' ')));
+    const ymd = new Date(pick.expiry).toISOString().slice(0, 10).replace(/-/g, '');
+    const t = dir === 'above' ? 'C' : 'P';
+    const wantRows = dir === 'above' ? [['Buy', pick.lo], ['Sell', pick.hi]] : [['Buy', pick.hi], ['Sell', pick.lo]];
+    if (rows.length !== 2) fail(`underlying shows ${rows.length} rows`);
+    else wantRows.forEach(([side, k], i) => {
+      if (!rows[i].startsWith(side) || !rows[i].includes(`${asset}-${ymd}-${k}-${t}`)) fail(`underlying row ${i + 1} "${rows[i]}", expected ${side} ${asset}-${ymd}-${k}-${t}`);
+    });
+    const before = await page.$$eval('.bet-list li', (l) => l.length);
     await page.click('.bet-card .primary');
     await page.waitForTimeout(250);
-    // 3. The bet's legs, independently: what they pay per share at expiry.
     const pos = await page.evaluate(() => JSON.parse(localStorage.getItem('ticket.positions.v1')).positions[0]);
-    const b = pos.bet;
-    if (!b) fail('no bet saved');
-    else {
-      const payAt = (S) => pos.legs.reduce((a, l) => a + l.side * l.qty * (l.type === 'C' ? Math.max(S - l.strike, 0) : Math.max(l.strike - S, 0)), 0) / b.shares;
-      const win = b.dir === 'above' ? b.hi + (b.hi - b.lo) : b.lo - (b.hi - b.lo);
-      const lose = b.dir === 'above' ? b.lo - (b.hi - b.lo) : b.hi + (b.hi - b.lo);
-      if (Math.abs(payAt(win) - 1) > 1e-9) fail(`pays ${payAt(win)} per share when right, not $1`);
-      if (Math.abs(payAt(lose)) > 1e-9) fail(`pays ${payAt(lose)} per share when wrong, not $0`);
-      if (Math.abs(payAt(b.level) - 0.5) > 1e-9) fail(`pays ${payAt(b.level)} at the level, not 50¢`);
-      if (Math.abs(b.shares - stake / res.q.price) > 1e-6 * b.shares) fail(`${b.shares} shares for $${stake} at ${res.q.price}`);
-      const paid = pos.legs.reduce((a, l) => a + l.side * l.qty * l.entry, 0);
-      if (Math.abs(paid - stake) > 0.01 * stake) fail(`legs cost $${paid.toFixed(2)} for a $${stake} bet`);
-      // 4. On the chart and in the list; then sell it.
-      const listed = await page.$$eval('.bet-list li', (l) => l.length);
-      if (listed !== before + 1) fail(`bet list has ${listed} rows, expected ${before + 1}`);
-      await page.click('.bet-list li >> nth=0 >> .link');
-      await page.waitForTimeout(200);
-      const after = await page.$$eval('.bet-list li', (l) => l.length);
-      if (after !== before) fail(`selling left ${after} bets, expected ${before}`);
-    }
+    const b = pos?.bet;
+    if (!b) { fail('no bet saved'); continue; }
+    if (b.lo !== pick.lo || b.hi !== pick.hi || b.expiry !== pick.expiry || b.dir !== dir) fail(`saved bet ${b.dir} ${b.lo}/${b.hi} isn't the box clicked`);
+    const payAt = (S) => pos.legs.reduce((a, l) => a + l.side * l.qty * (l.type === 'C' ? Math.max(S - l.strike, 0) : Math.max(l.strike - S, 0)), 0) / b.shares;
+    const w = b.hi - b.lo;
+    const [win, lose] = dir === 'above' ? [b.hi + w, b.lo - w] : [b.lo - w, b.hi + w];
+    if (Math.abs(payAt(win) - 1) > 1e-9) fail(`pays ${payAt(win)} per share when right, not $1`);
+    if (Math.abs(payAt(lose)) > 1e-9) fail(`pays ${payAt(lose)} per share when wrong, not $0`);
+    if (Math.abs(payAt((b.lo + b.hi) / 2) - 0.5) > 1e-9) fail(`pays ${payAt((b.lo + b.hi) / 2)} in the middle, not 50¢`);
+    const paid = pos.legs.reduce((a, l) => a + l.side * l.qty * l.entry, 0);
+    if (Math.abs(paid - stake) > 0.01 * stake) fail(`legs cost $${paid.toFixed(2)} for a $${stake} bet`);
+    // 4. Listed, then sold.
+    const listed = await page.$$eval('.bet-list li', (l) => l.length);
+    if (listed !== before + 1) fail(`bet list has ${listed} rows, expected ${before + 1}`);
+    await page.click('.bet-list li >> nth=0 >> .link');
+    await page.waitForTimeout(200);
+    const after = await page.$$eval('.bet-list li', (l) => l.length);
+    if (after !== before) fail(`selling left ${after} bets, expected ${before}`);
   }
-  const label = `${asset} ${res.q ? `${res.q.dir} ${res.q.level} on ${new Date(res.q.expiry).toISOString().slice(5, 10)} at ${(res.q.price * 100).toFixed(1)}¢` : ''} [${horizon}d, $${stake}]`;
+  const label = `${asset} [${horizon}d] · ${grid.boxes.length} boxes in ${cols.length} columns · bets on ${new Date(col).toISOString().slice(5, 10)}, $${stake}`;
   if (failures.length) {
     failed++;
     console.log(`FAIL ${label}`);
     for (const f of failures) console.log(`     - ${f}`);
   } else console.log(`ok   ${label}`);
 }
-console.log(`\n${cases.length - failed}/${cases.length} bets passed${pageErrors.length ? ` · page errors: ${pageErrors.join('; ')}` : ''}`);
+console.log(`\n${cases.length - failed}/${cases.length} grids passed${pageErrors.length ? ` · page errors: ${pageErrors.join('; ')}` : ''}`);
 await browser.close();
 await server.httpServer.close();
 process.exit(failed || pageErrors.length ? 1 : 0);
