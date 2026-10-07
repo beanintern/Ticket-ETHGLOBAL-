@@ -1,4 +1,4 @@
-// A Derive account connected with a session key (testnet only for now).
+// A Derive account (mainnet or testnet) connected with a session key.
 //
 // The session key is a delegated signing key registered to the wallet, so the wallet's own key
 // never enters the app. It signs the WebSocket login here, and orders later on. It lives in this
@@ -9,6 +9,7 @@ import type { DeriveClient } from '@derivexyz/derive-ts';
 import type { OptType } from '../lib/bs';
 import { BUILDER, type Instrument, type LegOrder } from './orders';
 import type { Asset } from '../lib/market';
+import { NETS, type DeriveNet } from './network';
 
 export interface Credentials {
   /** The wallet that owns the Derive account. */
@@ -87,7 +88,8 @@ export interface OrderResult {
 }
 
 const REFRESH_MS = 5000;
-const STORE = 'ticket.derive.testnet.session';
+/** Saved credentials per network (the testnet name predates mainnet support). */
+const store = (net: DeriveNet) => `ticket.derive.${net}.session`;
 
 const num = (v: unknown) => {
   const n = Number(v);
@@ -124,10 +126,10 @@ function storage(remember: boolean): Storage | null {
   }
 }
 
-export function loadCredentials(): { creds: Credentials; remember: boolean } | null {
+export function loadCredentials(net: DeriveNet): { creds: Credentials; remember: boolean } | null {
   for (const remember of [false, true]) {
     try {
-      const raw = storage(remember)?.getItem(STORE);
+      const raw = storage(remember)?.getItem(store(net));
       if (raw) return { creds: JSON.parse(raw) as Credentials, remember };
     } catch {
       /* storage unavailable */
@@ -136,20 +138,21 @@ export function loadCredentials(): { creds: Credentials; remember: boolean } | n
   return null;
 }
 
-function saveCredentials(creds: Credentials | null, remember: boolean) {
+function saveCredentials(net: DeriveNet, creds: Credentials | null, remember: boolean) {
   try {
-    storage(false)?.removeItem(STORE);
-    storage(true)?.removeItem(STORE);
-    if (creds) storage(remember)?.setItem(STORE, JSON.stringify(creds));
+    storage(false)?.removeItem(store(net));
+    storage(true)?.removeItem(store(net));
+    if (creds) storage(remember)?.setItem(store(net), JSON.stringify(creds));
   } catch {
     /* storage unavailable: stays connected until reload */
   }
 }
 
 /** Plain-language version of an SDK/exchange error. */
-export function explainError(e: unknown): string {
+export function explainError(e: unknown, net?: DeriveNet): string {
   const msg = e instanceof Error ? e.message : String(e);
-  if (/14026|Session key not found/i.test(msg)) return 'Derive doesn’t know this session key for that wallet. Check it’s registered on testnet and not expired.';
+  if (/14026|Session key not found/i.test(msg))
+    return `Derive doesn’t know this session key for that wallet. Check it’s registered${net ? ` on ${NETS[net].name}` : ''} and not expired.`;
   if (/401|Unauthorized/i.test(msg)) return 'Derive rejected the login. Check the wallet address and session key.';
   if (/invalid private key|invalid BytesLike|invalid hexlify/i.test(msg)) return 'That doesn’t look like a private key (64 hex characters, optionally starting with 0x).';
   if (/invalid address/i.test(msg)) return 'That doesn’t look like a wallet address.';
@@ -164,12 +167,16 @@ export class DeriveAccount {
   private closed = false;
   private instrumentCache = new Map<string, Promise<Instrument>>();
 
-  private constructor(owner: string, signer: string) {
+  private constructor(
+    readonly net: DeriveNet,
+    owner: string,
+    signer: string,
+  ) {
     this.state = { status: 'connecting', error: null, owner, signer, subaccountIds: [], subaccountId: null, scopes: null, canTrade: null, portfolio: null };
   }
 
   /** Validates the credentials, logs in over the WebSocket and starts polling the portfolio. */
-  static async connect(creds: Credentials, remember: boolean): Promise<DeriveAccount> {
+  static async connect(net: DeriveNet, creds: Credentials, remember: boolean): Promise<DeriveAccount> {
     const [{ DeriveClient }, { Wallet, getAddress }] = await Promise.all([import('@derivexyz/derive-ts'), import('ethers')]);
     let owner: string;
     let key: InstanceType<typeof Wallet>;
@@ -188,8 +195,8 @@ export class DeriveAccount {
       throw new Error('That’s the wallet’s own private key. Use a session key registered to the wallet instead, so the wallet key never leaves your wallet.');
     }
 
-    const acct = new DeriveAccount(owner, key.address);
-    const client = new DeriveClient({ network: 'testnet', sessionKey: key, ownerAddress: owner });
+    const acct = new DeriveAccount(net, owner, key.address);
+    const client = new DeriveClient({ network: net, sessionKey: key, ownerAddress: owner });
     acct.client = client;
     try {
       await client.connect();
@@ -198,9 +205,9 @@ export class DeriveAccount {
       acct.state.subaccountId = ids[0] ?? null;
     } catch (e) {
       await client.close().catch(() => {});
-      throw new Error(explainError(e));
+      throw new Error(explainError(e, net));
     }
-    saveCredentials({ owner, sessionKey: key.privateKey }, remember);
+    saveCredentials(net, { owner, sessionKey: key.privateKey }, remember);
 
     // The key's scopes decide whether it can place orders. Reading them may itself need a scope,
     // so a failure here just means "unknown".
@@ -297,7 +304,7 @@ export class DeriveAccount {
       this.state.error = null;
     } catch (e) {
       // Keep showing the last snapshot; the SDK reconnects (and logs in again) on its own.
-      this.state.error = explainError(e);
+      this.state.error = explainError(e, this.net);
       if (!this.state.portfolio) this.state.status = 'error';
     }
     if (!this.closed) this.emit();
@@ -352,7 +359,7 @@ export class DeriveAccount {
           const q = await this.sdk.orders.getOrderQuote(this.params(o, mode));
           return { valid: q.is_valid, reason: q.invalid_reason ? String(q.invalid_reason) : null, fillPrice: num(q.estimated_fill_price), fillAmount: num(q.estimated_fill_amount), fee: num(q.estimated_fee) };
         } catch (e) {
-          return { valid: false, reason: explainError(e), fillPrice: 0, fillAmount: 0, fee: 0 };
+          return { valid: false, reason: explainError(e, this.net), fillPrice: 0, fillAmount: 0, fee: 0 };
         }
       }),
     );
@@ -370,7 +377,7 @@ export class DeriveAccount {
         const filled = num(res.order.filled_amount);
         results.push({ order: o, ok: true, status: String(res.order.order_status), filled, averagePrice: num(res.order.average_price), error: null });
       } catch (e) {
-        results.push({ order: o, ok: false, status: 'rejected', filled: 0, averagePrice: 0, error: explainError(e) });
+        results.push({ order: o, ok: false, status: 'rejected', filled: 0, averagePrice: 0, error: explainError(e, this.net) });
         break;
       }
     }
@@ -387,7 +394,7 @@ export class DeriveAccount {
   async disconnect() {
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
-    saveCredentials(null, false);
+    saveCredentials(this.net, null, false);
     await this.client?.close().catch(() => {});
     this.client = null;
   }

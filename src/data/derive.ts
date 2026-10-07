@@ -1,6 +1,6 @@
 // Live market data from Derive's public API, over its WebSocket.
 //
-// Two networks: mainnet on the v2 API (wss://api.lyra.finance/ws) and the v3 testnet on Sepolia
+// Two networks on Derive's v3 API: mainnet (wss://api.derive.xyz/v3/ws) and the testnet on Sepolia
 // (wss://testnet.api.derive.xyz/v3/ws). Everything goes over the WebSocket (JSON-RPC requests
 // plus subscriptions), which also avoids CORS: the REST endpoints don't allow browser origins
 // other than Derive's own. Read-only: no account, keys or signing are involved here.
@@ -11,12 +11,10 @@ import type { Market, MarketSource, Quote } from './types';
 export interface DeriveNetwork {
   kind: 'live' | 'testnet';
   url: string;
-  /** v3 renamed a few public methods (instruments, price history). */
-  api: 'v2' | 'v3';
 }
 
-export const DERIVE_MAINNET: DeriveNetwork = { kind: 'live', url: 'wss://api.lyra.finance/ws', api: 'v2' };
-export const DERIVE_TESTNET: DeriveNetwork = { kind: 'testnet', url: 'wss://testnet.api.derive.xyz/v3/ws', api: 'v3' };
+export const DERIVE_MAINNET: DeriveNetwork = { kind: 'live', url: 'wss://api.derive.xyz/v3/ws' };
+export const DERIVE_TESTNET: DeriveNetwork = { kind: 'testnet', url: 'wss://testnet.api.derive.xyz/v3/ws' };
 const ASSETS: Asset[] = ['ETH', 'BTC'];
 /** How often every expiry's quotes are re-fetched. */
 const QUOTE_REFRESH_MS = 10_000;
@@ -260,26 +258,23 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
   };
 
   async function loadInstruments(asset: Asset) {
-    type Instr = { instrument_name: string; option_details: { expiry: number; strike: string; option_type: OptType } };
+    type Instr = { instrument_name: string; is_active: boolean; option_details: { expiry: number; strike: string; option_type: OptType } };
     let list: Instr[] = [];
-    if (network.api === 'v2') {
-      list = await sock.call<Instr[]>('public/get_instruments', { currency: asset, instrument_type: 'option', expired: false });
-    } else {
-      // v3: paginated, at most 1000 per page.
-      for (let page = 1; ; page++) {
-        const res = await sock.call<{ instruments: Instr[]; pagination: { num_pages: number } }>('public/get_all_instruments', {
-          currency: asset,
-          instrument_type: 'option',
-          expired: false,
-          page,
-          page_size: 1000,
-        });
-        list = list.concat(res.instruments);
-        if (page >= res.pagination.num_pages) break;
-      }
+    // Paginated, at most 1000 per page.
+    for (let page = 1; ; page++) {
+      const res = await sock.call<{ instruments: Instr[]; pagination: { num_pages: number } }>('public/get_all_instruments', {
+        currency: asset,
+        instrument_type: 'option',
+        expired: false,
+        page,
+        page_size: 1000,
+      });
+      list = list.concat(res.instruments);
+      if (page >= res.pagination.num_pages) break;
     }
     const byExpiry = new Map<number, Set<number>>();
-    for (const i of list) {
+    // Listed but not yet trading (scheduled for later) instruments have no quotes: skip them.
+    for (const i of list.filter((x) => x.is_active !== false)) {
       const ts = i.option_details.expiry * 1000;
       const k = Number(i.option_details.strike);
       if (!byExpiry.has(ts)) byExpiry.set(ts, new Set());
@@ -293,43 +288,17 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
   async function loadHistory(asset: Asset) {
     const now = Math.floor(Date.now() / 1000);
     const span = 20 * 86400;
-    let candles: Candle[];
-    if (network.api === 'v2') {
-      // The endpoint returns at most 500 points per call: fetch ~40 days of hourly prices in two
-      // halves, plus daily prices for the year before that (for zoomed-out views).
-      type Pt = { price: string; timestamp: number };
-      const hist = (start: number, end: number, period: number) =>
-        sock.call<{ spot_feed_history: Pt[] }>('public/get_spot_feed_history', { currency: asset, start_timestamp: start, end_timestamp: end, period });
-      const parts = await Promise.all([
-        hist(now - 2 * span - 400 * 86400, now - 2 * span, 86400),
-        hist(now - 2 * span, now - span, 3600),
-        hist(now - span, now, 3600),
-      ]);
-      const seen = new Set<number>();
-      const pts = parts
-        .flatMap((p) => p.spot_feed_history)
-        .map((p) => ({ t: p.timestamp * 1000, price: Number(p.price) }))
-        .filter((p) => Number.isFinite(p.price) && !seen.has(p.t) && seen.add(p.t))
-        .sort((a, b) => a.t - b.t);
-      // The feed gives one price per hour; draw each hour as a candle from the previous close.
-      candles = [];
-      for (const p of pts) {
-        const o = candles.length ? candles[candles.length - 1].c : p.price;
-        candles.push({ t: p.t, o, h: Math.max(o, p.price), l: Math.min(o, p.price), c: p.price });
-      }
-    } else {
-      // v3 has real OHLC candles: daily for the year before, hourly for the last 40 days.
-      type Oc = { open_price: string; high_price: string; low_price: string; close_price: string; timestamp: number };
-      const chart = (start: number, end: number, period: number) =>
-        sock.call<Oc[]>('public/get_index_chart_data', { currency: asset, start_timestamp: start, end_timestamp: end, period });
-      const [daily, hourly] = await Promise.all([chart(now - 2 * span - 400 * 86400, now - 2 * span, 86400), chart(now - 2 * span, now, 3600)]);
-      const hourlyFrom = (now - 2 * span) * 1000;
-      candles = [...daily.map((c) => ({ ...c, daily: true })), ...hourly.map((c) => ({ ...c, daily: false }))]
-        .map((c) => ({ t: c.timestamp * 1000, o: Number(c.open_price), h: Number(c.high_price), l: Number(c.low_price), c: Number(c.close_price), daily: c.daily }))
-        .filter((c) => [c.o, c.h, c.l, c.c].every(Number.isFinite) && (c.daily ? c.t < hourlyFrom : c.t >= hourlyFrom))
-        .sort((a, b) => a.t - b.t)
-        .map(({ t, o, h, l, c }) => ({ t, o, h, l, c }));
-    }
+    // Real OHLC candles: daily for the year before, hourly for the last 40 days.
+    type Oc = { open_price: string; high_price: string; low_price: string; close_price: string; timestamp: number };
+    const chart = (start: number, end: number, period: number) =>
+      sock.call<Oc[]>('public/get_index_chart_data', { currency: asset, start_timestamp: start, end_timestamp: end, period });
+    const [daily, hourly] = await Promise.all([chart(now - 2 * span - 400 * 86400, now - 2 * span, 86400), chart(now - 2 * span, now, 3600)]);
+    const hourlyFrom = (now - 2 * span) * 1000;
+    const candles: Candle[] = [...daily.map((c) => ({ ...c, daily: true })), ...hourly.map((c) => ({ ...c, daily: false }))]
+      .map((c) => ({ t: c.timestamp * 1000, o: Number(c.open_price), h: Number(c.high_price), l: Number(c.low_price), c: Number(c.close_price), daily: c.daily }))
+      .filter((c) => [c.o, c.h, c.l, c.c].every(Number.isFinite) && (c.daily ? c.t < hourlyFrom : c.t >= hourlyFrom))
+      .sort((a, b) => a.t - b.t)
+      .map(({ t, o, h, l, c }) => ({ t, o, h, l, c }));
     const st = states[asset];
     st.candles = candles;
     if (!st.spot && candles.length) st.spot = candles[candles.length - 1].c;

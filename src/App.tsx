@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DeriveAccount, loadCredentials, type AccountState, type Credentials, type OrderResult, type Portfolio } from './account/derive';
+import { NETS, type DeriveNet } from './account/network';
 import { forgetSessionKey, hasMetaMask, metaMaskSigner, registerSessionKey, savedSessionKey } from './account/metamask';
 import { instrumentName, legOrders, type LegOrder, type OrderMode } from './account/orders';
 import type { Trading } from './components/DeriveReview';
@@ -185,7 +186,7 @@ function SourceSwitch({ source }: { source: MarketSource }) {
     <div className="conn" role="group" aria-label="Market data">
       <span className="wide-only conn-label">Derive</span>
       <div className="seg conn-seg">
-        {networkButton('live', 'Live', 'Live market data from Derive mainnet. Orders are paper trades.')}
+        {networkButton('live', 'Live', 'Live market data from Derive mainnet. Connect an account to trade with real USDC; otherwise orders are paper trades.')}
         {networkButton('testnet', 'Testnet', "Market data from Derive's testnet (Sepolia), with test funds.")}
         <button className={source.kind === 'mock' ? 'is-active' : ''} onClick={() => go('mock')} title="Simulated prices. Nothing is sent to Derive.">
           Demo
@@ -240,19 +241,25 @@ export default function App() {
   const [selectedLegId, setSelectedLegId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Derive account (testnet only): connected with a session key that stays in this browser.
-  const accountEnabled = source.kind === 'testnet';
+  // Derive account: real USDC on mainnet (Live), test funds on Testnet. Connected with a session
+  // key that stays in this browser.
+  const net: DeriveNet | null = source.kind === 'live' ? 'mainnet' : source.kind === 'testnet' ? 'testnet' : null;
+  const accountEnabled = net !== null;
   const [account, setAccount] = useState<DeriveAccount | null>(null);
   const [accountState, setAccountState] = useState<AccountState | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
-  const [savedCreds] = useState(() => (accountEnabled ? loadCredentials() : null));
-  const connectAccount = useCallback(async (creds: Credentials, remember: boolean) => {
-    const acct = await DeriveAccount.connect(creds, remember);
-    setAccount((prev) => {
-      void prev?.disconnect();
-      return acct;
-    });
-  }, []);
+  const [savedCreds] = useState(() => (net ? loadCredentials(net) : null));
+  const connectAccount = useCallback(
+    async (creds: Credentials, remember: boolean) => {
+      if (!net) return;
+      const acct = await DeriveAccount.connect(net, creds, remember);
+      setAccount((prev) => {
+        void prev?.disconnect();
+        return acct;
+      });
+    },
+    [net],
+  );
   useEffect(() => {
     if (!account) {
       setAccountState(null);
@@ -270,23 +277,24 @@ export default function App() {
   }, [savedCreds, connectAccount]);
   // MetaMask: reuse this browser's trading key for the wallet if it's still valid, else register one.
   const connectMetaMask = async (onStep: (s: string) => void) => {
-    const owner = await metaMaskSigner();
-    const saved = savedSessionKey(owner.address);
+    if (!net) return;
+    const owner = await metaMaskSigner(net);
+    const saved = savedSessionKey(net, owner.address);
     if (saved) {
       try {
         onStep('Reconnecting with your trading key…');
         await connectAccount({ owner: owner.address, sessionKey: saved }, true);
         return;
       } catch {
-        forgetSessionKey(owner.address);
+        forgetSessionKey(net, owner.address);
       }
     }
-    const creds = await registerSessionKey(owner, onStep);
+    const creds = await registerSessionKey(net, owner, onStep);
     onStep('Loading your account…');
     await connectAccount(creds, true);
   };
   const disconnectAccount = () => {
-    if (account) forgetSessionKey(account.state.owner);
+    if (account) forgetSessionKey(account.net, account.state.owner);
     void account?.disconnect();
     setAccount(null);
     setAccountOpen(false);
@@ -539,12 +547,13 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedLegId, onRemove, stepHistory]);
 
-  // Real orders on Derive testnet, while an account with a subaccount is connected.
+  // Real orders on Derive (mainnet: real USDC; testnet: test funds), while an account with a subaccount is connected.
   const subaccountId = accountState?.subaccountId ?? null;
   const canTrade = accountState?.canTrade ?? null;
   const trading = useMemo<Trading | null>(() => {
     if (!account || subaccountId === null) return null;
     return {
+      info: NETS[account.net],
       canTrade,
       subaccountId,
       prepare: async (legs, mode: OrderMode) => {
@@ -591,7 +600,7 @@ export default function App() {
     }
   };
 
-  // Easy mode on Derive testnet: a bet is its two legs, sent together (the buy first, so a
+  // Easy mode on Derive: a bet is its two legs, sent together (the buy first, so a
   // half-filled bet leaves a bought option, never a naked sale).
   const buyBetLive = async (q: BetQuote, orders: LegOrder[], estFees: number) => {
     if (!trading) return;
@@ -624,22 +633,23 @@ export default function App() {
       legs,
       openedAt: now,
       openSpot: markets[q.asset].spot,
-      venue: 'derive-testnet',
+      venue: trading.info.venue,
       bet: { dir: q.dir, level: q.level, lo: q.lo, hi: q.hi, expiry: q.expiry, shares, entry: cost.perShare },
     };
     setPositions((ps) => [pos, ...ps]);
     setPick(null);
     const extra = results.some((r) => r.filled > amount + 1e-9) ? ' (one leg filled a little more; the extra shows in Pro › Positions)' : '';
-    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${fmtCents(cost.perShare)} on Derive testnet: ${pos.name}${extra}`);
+    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${fmtCents(cost.perShare)} on ${trading.info.name}: ${pos.name}${extra}`);
   };
 
-  // Selling a testnet bet: close the sold leg first, then the bought one, reduce-only.
+  // Selling a bet held on Derive: close the sold leg first, then the bought one, reduce-only.
   const sellBet = async (id: string) => {
     const pos = positions.find((p) => p.id === id);
     if (!pos) return;
-    if (pos.venue !== 'derive-testnet') return closePosition(id);
-    if (!account) {
-      setToast('Connect your Derive testnet account to sell this bet.');
+    if (!pos.venue) return closePosition(id);
+    const where = pos.venue === 'derive-mainnet' ? NETS.mainnet : NETS.testnet;
+    if (!account || account.net !== where.net) {
+      setToast(`This bet is on ${where.name}: ${net === where.net ? 'connect your account' : `switch to ${where.real ? 'Live' : 'Testnet'} and connect`} to sell it.`);
       return;
     }
     try {
@@ -654,7 +664,7 @@ export default function App() {
       const paid = pos.bet ? pos.bet.entry * pos.bet.shares : 0;
       setPositions((ps) => ps.filter((p) => p.id !== id));
       setClosed((c) => [{ id, asset: pos.asset, name: pos.name, openedAt: pos.openedAt, closedAt: now, realized: proceeds - paid }, ...c]);
-      setToast(`Sold on Derive testnet: ${pos.name} (${signedUsd(proceeds - paid)})`);
+      setToast(`Sold on ${where.name}: ${pos.name} (${signedUsd(proceeds - paid)})`);
     } catch (e) {
       setToast(`Couldn't sell: ${(e as Error).message}`);
     }
@@ -778,10 +788,11 @@ export default function App() {
           </button>
         </div>
         <SourceSwitch source={source} />
-        {accountEnabled && <AccountButton account={accountState} onOpen={() => setAccountOpen(true)} />}
+        {net && <AccountButton info={NETS[net]} account={accountState} onOpen={() => setAccountOpen(true)} />}
       </header>
       {accountOpen && (
         <AccountPanel
+          info={NETS[net!]}
           account={accountState}
           initial={savedCreds}
           onConnect={connectAccount}
@@ -972,7 +983,7 @@ export default function App() {
               trading
                 ? { kind: 'live', trading, onBuyLive: buyBetLive }
                 : accountEnabled
-                  ? { kind: 'connect', onConnect: () => setAccountOpen(true) }
+                  ? { kind: 'connect', info: NETS[net!], onConnect: () => setAccountOpen(true) }
                   : { kind: 'paper' }
             }
           />
@@ -1004,6 +1015,7 @@ export default function App() {
           exchange={
             accountEnabled
               ? {
+                  info: NETS[net!],
                   account: accountState,
                   positions: onExchange,
                   onConnect: () => setAccountOpen(true),

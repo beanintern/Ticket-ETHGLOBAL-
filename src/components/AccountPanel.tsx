@@ -1,21 +1,22 @@
 import { useState } from 'react';
 import type { AccountState, Credentials } from '../account/derive';
 import { signedUsd, usd } from '../lib/format';
+import type { NetInfo } from '../account/network';
 
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
 /** Header button: "Connect" or the connected subaccount and its value. */
-export function AccountButton({ account, onOpen }: { account: AccountState | null; onOpen: () => void }) {
+export function AccountButton({ info, account, onOpen }: { info: NetInfo; account: AccountState | null; onOpen: () => void }) {
   if (!account) {
     return (
-      <button className="acct-btn" onClick={onOpen} title="Connect your Derive testnet account with a session key">
+      <button className="acct-btn" onClick={onOpen} title={`Connect your ${info.name} account`}>
         Connect
       </button>
     );
   }
   const p = account.portfolio;
   return (
-    <button className={`acct-btn is-on ${account.error ? 'is-warn' : ''}`} onClick={onOpen} title={account.error ?? `Derive testnet · ${account.owner}`}>
+    <button className={`acct-btn is-on ${account.error ? 'is-warn' : ''}`} onClick={onOpen} title={account.error ?? `${info.name}${info.real ? ' (real money)' : ''} · ${account.owner}`}>
       <span className="conn-dot" aria-hidden="true" />
       {account.subaccountId === null ? 'No subaccount' : `#${account.subaccountId}`}
       {p && <span className="num">{usd(p.value, 0)}</span>}
@@ -24,6 +25,7 @@ export function AccountButton({ account, onOpen }: { account: AccountState | nul
 }
 
 interface Props {
+  info: NetInfo;
   account: AccountState | null;
   initial: { creds: Credentials; remember: boolean } | null;
   onConnect: (creds: Credentials, remember: boolean) => Promise<void>;
@@ -35,7 +37,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function AccountPanel({ account, initial, onConnect, onMetaMask, metaMaskAvailable, onDisconnect, onSelectSubaccount, onClose }: Props) {
+export function AccountPanel({ info, account, initial, onConnect, onMetaMask, metaMaskAvailable, onDisconnect, onSelectSubaccount, onClose }: Props) {
   const [manual, setManual] = useState(false);
   const [step, setStep] = useState<string | null>(null);
   const [owner, setOwner] = useState(initial?.creds.owner ?? '');
@@ -77,7 +79,10 @@ export function AccountPanel({ account, initial, onConnect, onMetaMask, metaMask
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby="acct-title">
         <div className="modal-head">
           <div>
-            <div className="eyebrow">Derive testnet · Sepolia</div>
+            <div className="eyebrow">
+              {info.name} · {info.chain.name}
+              {info.real && <span className="real-tag">Real money</span>}
+            </div>
             <h2 id="acct-title">{account ? 'Account' : 'Connect account'}</h2>
           </div>
           <button className="ghost" onClick={onClose} aria-label="Close">
@@ -93,19 +98,18 @@ export function AccountPanel({ account, initial, onConnect, onMetaMask, metaMask
             </button>
             {error && <p className="form-error">{error}</p>}
             <ol className="steps">
-              <li>MetaMask shares your address and switches to Sepolia.</li>
+              <li>MetaMask shares your address and switches to {info.chain.name}.</li>
               <li>You sign in to Derive (a signature, no transaction, no gas).</li>
               <li>
                 You authorise a trading key this app creates in your browser. It can place and cancel orders but can’t withdraw, and it expires in 7 days.
                 After that, trades need no popups.
               </li>
             </ol>
+            {info.real && (
+              <p className="real-note">This is your real Derive account: orders placed here trade real USDC. Signing in and authorising the key cost no gas.</p>
+            )}
             <p className="fine">
-              Your wallet’s key never leaves MetaMask. No Derive account yet? Get Sepolia ETH from a faucet, then Mint test USDC and deposit at{' '}
-              <a href="https://testnet.app.derive.xyz/developers" target="_blank" rel="noreferrer">
-                testnet.app.derive.xyz
-              </a>
-              .
+              Your wallet’s key never leaves MetaMask. No Derive account yet? <FundingHint info={info} />
             </p>
             <button className="link" onClick={() => setManual(true)}>
               Use an existing session key instead
@@ -143,23 +147,32 @@ export function AccountPanel({ account, initial, onConnect, onMetaMask, metaMask
               Back to MetaMask
             </button>
             <p className="fine">
-              The key stays in this browser: it signs the login and your orders here and is never sent anywhere. Test funds: Sepolia ETH from a faucet,
-              then Mint USDC and deposit at{' '}
-              <a href="https://testnet.app.derive.xyz/developers" target="_blank" rel="noreferrer">
-                testnet.app.derive.xyz
-              </a>
-              .
+              The key stays in this browser: it signs the login and your orders here and is never sent anywhere. <FundingHint info={info} />
             </p>
           </form>
         ) : (
-          <AccountDetails account={account} onDisconnect={onDisconnect} onSelectSubaccount={onSelectSubaccount} />
+          <AccountDetails info={info} account={account} onDisconnect={onDisconnect} onSelectSubaccount={onSelectSubaccount} />
         )}
       </div>
     </div>
   );
 }
 
-function AccountDetails({ account, onDisconnect, onSelectSubaccount }: { account: AccountState; onDisconnect: () => void; onSelectSubaccount: (id: number) => void }) {
+/** Where to get funds and create an account on this network. */
+function FundingHint({ info }: { info: NetInfo }) {
+  const link = (
+    <a href={info.app} target="_blank" rel="noreferrer">
+      {info.app.replace(/^https:\/\//, '').replace(/\/developers$/, '')}
+    </a>
+  );
+  return info.real ? (
+    <>Deposit USDC at {link} to create one.</>
+  ) : (
+    <>Get Sepolia ETH from a faucet, then Mint test USDC and deposit at {link}.</>
+  );
+}
+
+function AccountDetails({ info, account, onDisconnect, onSelectSubaccount }: { info: NetInfo; account: AccountState; onDisconnect: () => void; onSelectSubaccount: (id: number) => void }) {
   const p = account.portfolio;
   const upnl = p ? p.positions.reduce((a, x) => a + x.unrealizedPnl, 0) + p.otherPositions.reduce((a, x) => a + x.unrealizedPnl, 0) : 0;
   return (
@@ -213,7 +226,10 @@ function AccountDetails({ account, onDisconnect, onSelectSubaccount }: { account
 
       {account.subaccountId === null ? (
         <div className="empty">
-          <p>This wallet has no Derive subaccount yet. Deposit test USDC at testnet.app.derive.xyz to create one; it appears here a minute or two later.</p>
+          <p>
+            This wallet has no {info.name} subaccount yet. Deposit {info.real ? 'USDC' : 'test USDC'} at {info.app.replace(/^https:\/\//, '').replace(/\/developers$/, '')} to create one; it
+            appears here a minute or two later.
+          </p>
         </div>
       ) : !p ? (
         <p className="fine">{account.error ?? 'Loading portfolio…'}</p>
@@ -250,7 +266,7 @@ function AccountDetails({ account, onDisconnect, onSelectSubaccount }: { account
                 ))}
               </ul>
             ) : (
-              <p className="fine">None. Deposit test USDC to trade.</p>
+              <p className="fine">None. Deposit {info.real ? 'USDC' : 'test USDC'} to trade.</p>
             )}
           </div>
           {account.error && <p className="form-error">{account.error}</p>}

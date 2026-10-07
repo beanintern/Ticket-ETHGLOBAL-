@@ -3,3 +3,4 @@ dist
 dist-artifact
 *.local
 check-chart-failures
+*.tsbuildinfo

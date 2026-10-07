@@ -16,7 +16,7 @@
     "check:easy": "vite build && node scripts/check-easy.mjs"
   },
   "dependencies": {
-    "@derivexyz/derive-ts": "^3.0.25",
+    "@derivexyz/derive-ts": "^3.0.29",
     "ethers": "^6.17.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"

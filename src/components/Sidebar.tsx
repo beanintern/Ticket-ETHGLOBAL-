@@ -3,6 +3,7 @@ import type { Focus, Preset } from '../App';
 import { compactUsd, price as fmtPrice, signed, signedUsd, usd } from '../lib/format';
 import type { AccountState, OrderResult } from '../account/derive';
 import { DeriveReview, type Trading } from './DeriveReview';
+import type { NetInfo } from '../account/network';
 import type { Market } from '../data/types';
 import { expiryLabel, type Asset, type MarketSpec } from '../lib/market';
 import {
@@ -32,15 +33,16 @@ interface Props {
   onClear: () => void;
   onPreset: (p: Preset) => void;
   onPlace: () => void;
-  /** Real (testnet) trading, while a Derive account is connected. */
+  /** Real trading (mainnet or testnet), while a Derive account is connected. */
   trading: Trading | null;
   onPlaced: (results: OrderResult[]) => void;
   positions: Position[];
   /** Ids of positions ticked to compound on the chart. */
   compound: Set<string>;
   onToggleCompound: (id: string) => void;
-  /** The connected Derive account (testnet), or null when accounts aren't available. */
+  /** The Derive account (connected or not), or null when accounts aren't available (demo data). */
   exchange: {
+    info: NetInfo;
     account: AccountState | null;
     positions: Position[];
     onConnect: () => void;
@@ -315,12 +317,12 @@ function Builder({
                   <p className="fine">
                     Paper trade.{' '}
                     <button className="link" onClick={exchange.onConnect}>
-                      Connect your Derive testnet account
+                      Connect your {exchange.info.name} account
                     </button>{' '}
-                    to place real test orders.
+                    to place {exchange.info.real ? 'real orders (USDC)' : 'real test orders'}.
                   </p>
                 ) : (
-                  <p className="fine">Paper trade: filled at mark, nothing is sent to Derive. Switch to Testnet to place real test orders.</p>
+                  <p className="fine">Paper trade: filled at mark, nothing is sent to Derive. Switch to Live or Testnet to trade on Derive.</p>
                 )}
                 <div className="review-actions">
                   <button className="ghost" onClick={() => setReviewing(false)}>
@@ -487,12 +489,12 @@ function ExchangeSection({
   return (
     <section className="exchange">
       <div className="section-head">
-        <div className="eyebrow">On Derive testnet{account?.subaccountId != null ? ` · #${account.subaccountId}` : ''}</div>
+        <div className="eyebrow">On {exchange.info.name}{account?.subaccountId != null ? ` · #${account.subaccountId}` : ''}</div>
         {p && <span className="num muted">{usd(p.value)}</span>}
       </div>
       {!account ? (
         <div className="empty">
-          <p>Connect your Derive testnet account to see its positions here.</p>
+          <p>Connect your {exchange.info.name} account to see its positions here.</p>
           <button className="ghost" onClick={exchange.onConnect}>
             Connect account
           </button>
@@ -673,7 +675,9 @@ function Positions({ positions, exchange, closed, now, markets, focus, onFocus, 
         </div>
       )}
       <p className="fine">
-        {exchange ? 'Paper positions are simulated fills at mark; Derive positions are real (test funds).' : 'Example positions are simulated. Nothing here is a real trade.'}
+        {exchange
+          ? `Paper positions are simulated fills at mark; Derive positions are real${exchange.info.real ? '' : ' (test funds)'}.`
+          : 'Example positions are simulated. Nothing here is a real trade.'}
       </p>
     </div>
   );

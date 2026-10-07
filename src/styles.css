@@ -418,3 +418,10 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .underlying td { padding: 3px 0; }
 .underlying td:first-child { width: 38px; font-weight: 600; }
 .underlying td:last-child { text-align: right; }
+
+/* Real money (Derive mainnet) */
+.real-tag { margin-left: 8px; padding: 1px 6px; border-radius: 4px; background: rgba(240, 185, 80, 0.16); color: #f0b950; font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; vertical-align: 1px; }
+.real-note { margin: 8px 0; padding: 8px 10px; border: 1px solid rgba(240, 185, 80, 0.35); border-radius: 8px; background: rgba(240, 185, 80, 0.08); color: #f0d9a8; font-size: 12px; line-height: 1.45; }
+.bet-card .primary.is-confirm { background: #f0b950; color: #14110a; }
+.link.is-confirm { color: #f0b950; font-weight: 600; }
+.venue-tag.is-real { background: rgba(240, 185, 80, 0.16); color: #f0b950; }

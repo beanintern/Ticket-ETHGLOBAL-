@@ -3,9 +3,10 @@
 An options trading UI that feels like trading perps. The chart is the ticket: click a future
 expiry at a price to place a leg, and the P&L map shows where the position makes and loses money.
 
-Market data can be **live from Derive** (mainnet or testnet) or **simulated (demo)**. On testnet,
-with a Derive account connected, orders are real (test funds) and carry the builder code;
-everywhere else they're paper trades.
+Market data can be **live from Derive** (mainnet or testnet, both on Derive's v3 API) or
+**simulated (demo)**. With a Derive account connected, orders are real and carry the builder code:
+real USDC on **Live** (mainnet), test funds on **Testnet**. Without an account, and in Demo,
+they're paper trades.
 
 ## Run it
 
@@ -40,15 +41,15 @@ Switch with the **Live / Testnet / Demo** control in the header, or `?source=liv
 in the URL, or `VITE_SOURCE=live|testnet|mock` at build time. The default is live, except the single-file
 preview build, which can't open network connections and always uses demo data.
 
-- **Live** (`src/data/derive.ts`): Derive's public API over `wss://api.lyra.finance/ws`.
-  Listed expiries and strikes, the index price (`spot_feed.<ASSET>`), ~40 days of hourly
-  history (`public/get_spot_feed_history`), and each option's mark, bid, ask and IV
-  (`public/get_tickers`, refreshed every 10 s). Read-only: no account or keys. Everything goes
-  over the WebSocket because Derive's REST endpoints don't send CORS headers for other origins.
+- **Live** (`src/data/derive.ts`): Derive's v3 mainnet API over `wss://api.derive.xyz/v3/ws`.
+  Listed expiries and strikes (`public/get_all_instruments`, skipping ones not yet active), the
+  index price (`spot_feed.<ASSET>`), OHLC candles (`public/get_index_chart_data`: hourly for 40
+  days, daily for the year before), and each option's mark, bid, ask and IV
+  (`public/get_tickers`, refreshed every 10 s). Market data needs no account or keys. Everything
+  goes over the WebSocket because Derive's REST endpoints don't send CORS headers for other origins.
 - **Testnet** (same file, `DERIVE_TESTNET`): Derive's v3 testnet on Sepolia,
-  `wss://testnet.api.derive.xyz/v3/ws`. Same data, with the v3 method names
-  (`public/get_all_instruments`, and OHLC candles from `public/get_index_chart_data`). The
-  testnet index follows the real one; its history only goes back a few months.
+  `wss://testnet.api.derive.xyz/v3/ws`. Same API and data; the testnet index follows the real
+  one, but its history only goes back a few months.
 - **Demo** (`src/data/mock.ts`): generated price history, a random-walk index and a toy
   volatility smile. The automated chart check runs against this.
 
@@ -131,15 +132,17 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
   with what went in and what they're worth now, and can be sold any time. There's no payoff map
   in Easy mode.
 
-  On **Testnet** with a Derive account connected, bets are real orders (test funds). The card
+  With a Derive account connected, bets are real orders: real USDC on **Live**, test funds on
+  **Testnet**. On Live, Buy and Sell each take a second, confirming click that says how much USDC
+  is being spent. The card
   asks Derive for a dry run of both legs and shows the real price per share (spread and fees
   included) next to the fair price, sizing the bet so what you pay is the amount you entered.
   It warns when the book is thin (e.g. 51¢ for a 10% chance) and refuses a share that would cost
   more than $1. Buying sends both legs as immediate-or-cancel orders, the bought option first,
   so a half-filled bet leaves a bought option, never a naked sale. A filled bet is recorded at
   its fill prices (plus Derive's fee estimate) and tagged Derive; selling closes the sold leg
-  first, then the bought one, reduce-only. Without an account, testnet bets are paper, with a
-  link to connect. The builder code rides on every order as usual.
+  first, then the bought one, reduce-only. Without an account, bets are paper, with a link to
+  connect. The builder code rides on every order as usual.
 - **Draw path** (`src/lib/pathfit.ts`). Pick the Draw tool (`5`) and draw where you think price
   goes, left to right. On release the ticket becomes a position that pays off along that path:
   on each listed expiry the path spans (up to six, spread evenly, plus the next one if the path
@@ -159,14 +162,17 @@ Keys: `1`–`4` pick Buy Call / Sell Call / Buy Put / Sell Put, `5` Draw path, `
 `Delete` removes the selected leg, `Ctrl/⌘ Z` undo. Scroll zooms time; shift-scroll or drag the
 price axis for price; drag the chart to pan; double-click to reset.
 
-## Derive account (testnet)
+## Derive account (mainnet or testnet)
 
-In **Testnet** mode, **Connect** in the header opens the account panel (`src/account/`, using
-Derive's TypeScript SDK, loaded only when you connect).
+In **Live** or **Testnet** mode, **Connect** in the header opens the account panel (`src/account/`,
+using Derive's TypeScript SDK, loaded only when you connect). On Live it's your real Derive
+account, trading real USDC: the panel, order review and Easy bet card say so. Each network keeps
+its own saved keys (`src/account/network.ts` holds what differs between them).
 
 **Connect MetaMask** (`src/account/metamask.ts`):
 
-1. MetaMask shares the address and switches to Sepolia, the chain Derive's testnet signs for.
+1. MetaMask shares the address and switches to the chain Derive signs for: Ethereum for
+   mainnet, Sepolia for the testnet.
 2. The wallet signs a Derive login (EIP-191 over a timestamp; no transaction, no gas).
 3. The app generates a session key in the browser, and the wallet authorises it with one EIP-712
    signature (`private/set_session_key`). The key is scoped to `trade:orderbook:all` and
@@ -175,8 +181,9 @@ Derive's TypeScript SDK, loaded only when you connect).
 
 From then on the session key signs logins and orders without popups. It's saved in this browser
 per wallet and reused on the next connect until it's within an hour of expiry. **Disconnect**
-forgets it. The wallet's own key never leaves MetaMask. A wallet needs a Derive testnet account
-first: get Sepolia ETH from a faucet, then **Mint** test USDC and deposit at
+forgets it. The wallet's own key never leaves MetaMask. A wallet needs a Derive account on that
+network first: on mainnet, deposit USDC at [app.derive.xyz](https://app.derive.xyz); on the
+testnet, get Sepolia ETH from a faucet, then **Mint** test USDC and deposit at
 [testnet.app.derive.xyz/developers](https://testnet.app.derive.xyz/developers).
 
 **Use an existing session key instead**: paste the wallet address and a session key you
@@ -188,7 +195,7 @@ positions), other instruments and open orders, refreshed every 5 s.
 
 ### Placing orders
 
-With an account connected, **Review order** asks Derive for a dry run of every leg
+With an account connected, **Review order** (marked **Real money** on Live) asks Derive for a dry run of every leg
 (`private/order_quote`: validity, expected fill and fees) before anything is sent.
 
 - **Market**: one immediate-or-cancel limit order per leg, priced up to 3% past the best bid/ask,
@@ -211,12 +218,10 @@ VITE_DERIVE_EXTRA_FEE=0.1             # optional builder fee, USDC per contract
 
 With a code set, every order carries `referral_code` and `extra_fee`, the review panel shows the
 builder part of the fees, and Derive credits the fees to that code. Without one, orders go out
-with no builder fee. Whether testnet fees count toward the broker program is something to confirm
-with Derive.
+with no builder fee. The code has to be registered on the network you trade on (mainnet and
+testnet are separate).
 
 ## Next
 
 - One RFQ for multi-leg structures, so all legs fill together at one price (`private/send_rfq` +
   `private/execute_quote`) instead of leg by leg.
-- Mainnet: the same flow against `wss://api.derive.xyz/v3/ws`, once the market data moves from
-  the v2 API to v3.

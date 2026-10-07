@@ -26,8 +26,8 @@ export interface Position {
   openSpot: number;
   /** Set for easy-mode Yes bets: the question and shares behind the legs. */
   bet?: BetInfo;
-  /** Where it was traded: absent for paper, 'derive-testnet' for real (test-funds) orders. */
-  venue?: 'derive-testnet';
+  /** Where it was traded: absent for paper; Derive mainnet (real USDC) or testnet (test funds). */
+  venue?: 'derive-mainnet' | 'derive-testnet';
 }
 
 export interface ClosedPosition {

@@ -8,6 +8,7 @@ import { signedUsd, usd } from '../lib/format';
 import { expiryLabel, type Asset } from '../lib/market';
 import { buildModel, type Position } from '../lib/strategy';
 import type { Market } from '../data/types';
+import type { NetInfo } from '../account/network';
 
 const cents = fmtCents;
 const pnlClass = (v: number) => (v > 0.005 ? 'up' : v < -0.005 ? 'down' : '');
@@ -23,8 +24,8 @@ interface Props {
   onBuy: (q: BetQuote, stake: number) => void;
   bets: Position[];
   onSell: (id: string) => void;
-  /** Paper bets, a prompt to connect (testnet, no account), or real orders on Derive testnet. */
-  venue: { kind: 'paper' } | { kind: 'connect'; onConnect: () => void } | { kind: 'live'; trading: Trading; onBuyLive: (q: BetQuote, orders: LegOrder[], estFees: number) => Promise<void> };
+  /** Paper bets, a prompt to connect (Derive data, no account), or real orders on Derive (mainnet or testnet). */
+  venue: { kind: 'paper' } | { kind: 'connect'; info: NetInfo; onConnect: () => void } | { kind: 'live'; trading: Trading; onBuyLive: (q: BetQuote, orders: LegOrder[], estFees: number) => Promise<void> };
 }
 
 /** Exchange errors a bettor can act on, in plain words. */
@@ -34,7 +35,7 @@ function friendlyError(msg: string, q: BetQuote): string {
     const shares = min * (q.hi - q.lo);
     return `Too small for Derive: the minimum here is ${shares.toFixed(0)} shares, about $${Math.ceil(shares * q.price)} at the fair price. Increase the amount.`;
   }
-  if (/zero liquidity|no liquidity/i.test(msg)) return 'Nobody is quoting one of these options on testnet right now. Try a nearer date or a price closer to today’s.';
+  if (/zero liquidity|no liquidity/i.test(msg)) return 'Nobody is quoting one of these options on Derive right now. Try a nearer date or a price closer to today’s.';
   return msg;
 }
 
@@ -54,11 +55,14 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
   const tooSmall = !!pending && stake < minBet;
   const fairShares = size?.shares ?? 0;
 
-  // Live (testnet): ask Derive for a dry run of both legs, so the card shows the real cost.
+  // Live (a connected Derive account): ask Derive for a dry run of both legs, so the card shows the real cost.
   const live = venue.kind === 'live' ? venue : null;
   const quoteKey = live && pending && !pending.unavailable && !tooSmall && size ? `${pending.asset}|${pending.expiry}|${pending.dir}|${pending.lo}|${pending.hi}|${stake}` : '';
   const [liveQuote, setLiveQuote] = useState<LiveQuote | null>(null);
   const [sending, setSending] = useState(false);
+  // Real money (mainnet): Buy and Sell each take a second, confirming click.
+  const [confirmBuy, setConfirmBuy] = useState('');
+  const [confirmSell, setConfirmSell] = useState<string | null>(null);
   useEffect(() => {
     if (!quoteKey || !live || !pending) return;
     let alive = true;
@@ -212,13 +216,13 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             {live ? (
               <div className="bet-live">
                 {!lq ? (
-                  <p className="fine">Checking Derive testnet…</p>
+                  <p className="fine">Checking {live.trading.info.name}…</p>
                 ) : 'error' in lq ? (
                   <p className="form-error">{lq.error}</p>
                 ) : (
                   <div className="live-cost">
                     <div>
-                      <span>On Derive testnet</span>
+                      <span>On {live.trading.info.name}</span>
                       <b className="num">{liveCost && liveCost.shares > 0 ? cents(liveCost.perShare) : '–'}</b>
                       <span className="fine">per share · fair {cents(pending.price)}</span>
                     </div>
@@ -242,11 +246,21 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                   <p className="fine">Only {liveCost!.shares.toFixed(1)} shares can fill right now; the rest of the order is cancelled.</p>
                 )}
                 {live.trading.canTrade === false && <p className="form-error">This session key can't trade: reconnect to create a trading key.</p>}
+                {live.trading.info.real && confirmBuy === quoteKey && (
+                  <p className="real-note">
+                    Real money: this spends {liveCost ? usd(liveCost.cost, 2) : '–'} USDC from your Derive account. Click again to place the two orders.
+                  </p>
+                )}
                 <button
-                  className="primary"
+                  className={`primary ${live.trading.info.real && confirmBuy === quoteKey ? 'is-confirm' : ''}`}
                   disabled={!liveOk || !!liveInvalid || !liveCost || liveCost.shares <= 0 || liveCost.perShare >= 1 || sending || live.trading.canTrade === false}
                   onClick={async () => {
                     if (!liveOk) return;
+                    if (live.trading.info.real && confirmBuy !== quoteKey) {
+                      setConfirmBuy(quoteKey);
+                      return;
+                    }
+                    setConfirmBuy('');
                     setSending(true);
                     try {
                       await live.onBuyLive(pending, liveOk.orders, liveCost?.fees ?? 0);
@@ -255,7 +269,11 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                     }
                   }}
                 >
-                  {sending ? 'Sending…' : `Buy Yes on Derive · ${liveCost ? usd(liveCost.cost, 2) : usd(stake, 0)}`}
+                  {sending
+                    ? 'Sending…'
+                    : live.trading.info.real && confirmBuy === quoteKey
+                      ? `Confirm: buy for ${liveCost ? usd(liveCost.cost, 2) : '–'} USDC`
+                      : `Buy Yes on ${live.trading.info.name} · ${liveCost ? usd(liveCost.cost, 2) : usd(stake, 0)}`}
                 </button>
                 <button className="link" disabled={!size || tooSmall || !!pending.unavailable} onClick={() => onBuy(pending, stake)}>
                   Paper bet instead
@@ -269,7 +287,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 </button>
                 {venue.kind === 'connect' && (
                   <button className="link" onClick={venue.onConnect}>
-                    Connect your Derive testnet account to bet for real (test funds)
+                    Connect your {venue.info.name} account to bet for real ({venue.info.real ? 'USDC' : 'test funds'})
                   </button>
                 )}
               </>
@@ -305,7 +323,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               {(() => {
                 const [win, lose] = pending.dir === 'above' ? [pending.hi, pending.lo] : [pending.lo, pending.hi];
                 const [winWord, loseWord] = pending.dir === 'above' ? ['above', 'below'] : ['below', 'above'];
-                return `Pays $1 per share if ${asset} settles ${winWord} $${win.toLocaleString('en-US')} on ${expiryLabel(pending.expiry)}, nothing ${loseWord} $${lose.toLocaleString('en-US')}, and part-way in between. Built from a ${pending.lo}/${pending.hi} ${pending.dir === 'above' ? 'call' : 'put'} spread; you can sell any time before. ${live ? `On Derive testnet: two orders sent together, the buy first, each filling now within 3% of the best price or cancelled.` : 'Paper trade.'}`;
+                return `Pays $1 per share if ${asset} settles ${winWord} $${win.toLocaleString('en-US')} on ${expiryLabel(pending.expiry)}, nothing ${loseWord} $${lose.toLocaleString('en-US')}, and part-way in between. Built from a ${pending.lo}/${pending.hi} ${pending.dir === 'above' ? 'call' : 'put'} spread; you can sell any time before. ${live ? `On ${live.trading.info.name}${live.trading.info.real ? ' with real USDC' : ''}: two orders sent together, the buy first, each filling now within 3% of the best price or cancelled.` : 'Paper trade.'}`;
               })()}
             </p>
           </div>
@@ -332,7 +350,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                   <div className="bet-row">
                     <b>
                       {betQuestion(b.asset, bet.dir, bet.level)} · {expiryLabel(bet.expiry)}
-                      {b.venue === 'derive-testnet' && <span className="venue-tag">Derive</span>}
+                      {b.venue && <span className={`venue-tag ${b.venue === 'derive-mainnet' ? 'is-real' : ''}`}>{b.venue === 'derive-mainnet' ? 'Derive' : 'Testnet'}</span>}
                     </b>
                     <span className={`num ${pnlClass(pnl)}`}>{signedUsd(pnl)}</span>
                   </div>
@@ -341,8 +359,16 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                       {usd(bet.entry * bet.shares)} in · {done ? 'settled' : 'now'} {usd(px * bet.shares)} · wins {usd(bet.shares)}
                     </span>
                     {!done && (
-                      <button className="link" onClick={() => onSell(b.id)}>
-                        Sell {usd(px * bet.shares)}
+                      <button
+                        className={`link ${confirmSell === b.id ? 'is-confirm' : ''}`}
+                        onClick={() => {
+                          // Selling a real-money bet takes a confirming click.
+                          if (b.venue === 'derive-mainnet' && confirmSell !== b.id) return setConfirmSell(b.id);
+                          setConfirmSell(null);
+                          onSell(b.id);
+                        }}
+                      >
+                        {confirmSell === b.id ? `Confirm sell ~${usd(px * bet.shares)}` : `Sell ${usd(px * bet.shares)}`}
                       </button>
                     )}
                   </div>

@@ -3,9 +3,12 @@ import type { OrderPreview, OrderResult } from '../account/derive';
 import { BUILDER, SLIPPAGE, type LegOrder, type OrderMode } from '../account/orders';
 import { usd } from '../lib/format';
 import type { Leg } from '../lib/strategy';
+import type { NetInfo } from '../account/network';
 
 /** What the builder needs to trade on Derive; App provides it while an account is connected. */
 export interface Trading {
+  /** Which Derive the account is on: mainnet orders spend real USDC. */
+  info: NetInfo;
   /** False when the session key's scopes don't include orderbook trading; null if unknown. */
   canTrade: boolean | null;
   subaccountId: number | null;
@@ -15,7 +18,7 @@ export interface Trading {
 
 type Prepared = { orders: LegOrder[]; previews: OrderPreview[] };
 
-/** Order review for real (testnet) orders: one signed order per leg, previewed by Derive first. */
+/** Order review for real orders (mainnet or testnet): one signed order per leg, previewed by Derive first. */
 export function DeriveReview({ legs, trading, onBack, onPaper, onDone }: { legs: Leg[]; trading: Trading; onBack: () => void; onPaper: () => void; onDone: (r: OrderResult[]) => void }) {
   const [mode, setMode] = useState<OrderMode>('market');
   const [prep, setPrep] = useState<Prepared | null>(null);
@@ -63,7 +66,10 @@ export function DeriveReview({ legs, trading, onBack, onPaper, onDone }: { legs:
   return (
     <div className="review">
       <div className="review-head">
-        <div className="eyebrow">Derive testnet · #{trading.subaccountId}</div>
+        <div className="eyebrow">
+          {trading.info.name} · #{trading.subaccountId}
+          {trading.info.real && <span className="real-tag">Real money</span>}
+        </div>
         <div className="seg" role="group" aria-label="Order type">
           <button className={mode === 'market' ? 'is-active' : ''} onClick={() => setMode('market')} title={`Fill now against the book, up to ${SLIPPAGE * 100}% past the best price`}>
             Market
@@ -119,12 +125,13 @@ export function DeriveReview({ legs, trading, onBack, onPaper, onDone }: { legs:
           : 'Sent as one limit order per leg at mark, resting until filled; cancel from the Positions tab.'}
         {BUILDER.code ? ` Builder code ${BUILDER.code} attached.` : ''}
       </p>
+      {trading.info.real && <p className="real-note">These orders trade real USDC from your Derive account. Fills can’t be undone.</p>}
       <div className="review-actions">
         <button className="ghost" onClick={onBack}>
           Back
         </button>
         <button className="primary" disabled={!prep || invalid || sending || !!blocked} onClick={send}>
-          {sending ? 'Sending…' : 'Place on Derive'}
+          {sending ? 'Sending…' : trading.info.real ? `Place real order${cost > 0 ? ` · ${usd(cost + fees)}` : ''}` : 'Place on Derive testnet'}
         </button>
       </div>
       <button className="link" onClick={onPaper}>
