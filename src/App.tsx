@@ -201,6 +201,12 @@ export default function App() {
   const markets = source.markets;
 
   const [now, setNow] = useState(() => Date.now());
+  // Live data that hasn't arrived after a while: say so on the loading screen and offer demo data.
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setSlow(true), 10_000);
+    return () => clearTimeout(t);
+  }, []);
   const [asset, setAsset] = useState<Asset>('ETH');
   const [tool, setTool] = useState<Tool>('buyC');
   const [view, setView] = useState<ChartView>({ horizon: 21 * DAY, yZoom: 1, yShift: 0 });
@@ -720,9 +726,14 @@ export default function App() {
           <span className="brand-mark" aria-hidden="true" />
           Ticket
         </div>
-        {source.status === 'error' ? (
+        {source.status === 'error' || slow || source.error ? (
           <>
-            <p className="loading-error">{source.error}</p>
+            <p>{source.status === 'error' ? 'Couldn’t load Derive market data.' : 'Still connecting to Derive…'}</p>
+            {source.error && <p className="loading-error">{source.error}</p>}
+            <p className="fine">
+              If this doesn’t clear, something between you and Derive may be blocking it: a VPN, firewall, ad blocker, or a region Derive doesn’t
+              serve.
+            </p>
             <a href="?source=mock">Use demo data instead</a>
           </>
         ) : (

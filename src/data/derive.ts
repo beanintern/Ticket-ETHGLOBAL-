@@ -29,6 +29,7 @@ class DeriveSocket {
   private channels = new Map<string, (data: Json) => void>();
   private closed = false;
   private retry = 0;
+  private opened = false;
   onState: (s: 'open' | 'closed', err?: string) => void = () => {};
 
   constructor(private url: string) {
@@ -40,6 +41,7 @@ class DeriveSocket {
     this.ws = ws;
     ws.onopen = () => {
       this.retry = 0;
+      this.opened = true;
       if (this.channels.size) this.send('subscribe', { channels: [...this.channels.keys()] });
       this.onState('open');
     };
@@ -61,7 +63,10 @@ class DeriveSocket {
       for (const r of this.pending.values()) r.reject(new Error('connection closed'));
       this.pending.clear();
       if (this.closed) return;
-      this.onState('closed', 'Connection to Derive lost, reconnecting…');
+      this.onState(
+        'closed',
+        this.opened ? 'Connection to Derive lost, reconnecting…' : `Can't reach Derive (${new URL(this.url).host}), retrying…`,
+      );
       const delay = Math.min(30_000, 1000 * 2 ** this.retry++);
       setTimeout(() => !this.closed && this.connect(), delay);
     };
@@ -239,7 +244,7 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
   let closed = false;
   sock.onState = (s, err) => {
     if (s === 'closed') source.error = err ?? 'Disconnected';
-    else if (source.status === 'ready') source.error = null;
+    else if (source.status !== 'error') source.error = null;
     notify();
   };
 

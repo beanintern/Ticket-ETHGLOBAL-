@@ -123,6 +123,7 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .loading p { margin: 0; }
 .loading-error { color: var(--loss); max-width: 46ch; }
 .loading a { color: var(--long); }
+.loading .fine { max-width: 46ch; font-size: 12px; }
 
 /* ---- Workspace ---- */
 .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 360px; min-height: 0; }
