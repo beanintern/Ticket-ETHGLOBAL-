@@ -12,6 +12,9 @@ import { bsPriceForCheck } from './bs-for-check.mjs';
 
 const vite = await createServer({ server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
 const { createDeriveSource, DERIVE_MAINNET, DERIVE_TESTNET } = await vite.ssrLoadModule('/src/data/derive.ts');
+const { instrumentName } = await vite.ssrLoadModule('/src/account/orders.ts');
+const { MARKETS } = await vite.ssrLoadModule('/src/lib/market.ts');
+const { DeriveClient } = await import('@derivexyz/derive-ts');
 const testnet = process.env.NETWORK === 'testnet';
 // The testnet only has a few months of index history.
 const MIN_HISTORY_DAYS = testnet ? 90 : 300;
@@ -32,16 +35,31 @@ await new Promise((resolve, reject) => {
 console.log(`Derive data ready in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
 
 const now = Date.now();
-for (const asset of ['ETH', 'BTC']) {
+// Every asset Derive lists with options (or ASSETS=ETH,SOL to pick some).
+const listed = src.assets.map((a) => a.asset);
+console.log(`${listed.length} assets with options: ${listed.join(', ')}\n`);
+for (const known of Object.keys(MARKETS)) if (!listed.includes(known)) fail(`${known} isn't in Derive's asset list any more`);
+const pub = new DeriveClient({ network: testnet ? 'testnet' : 'mainnet' });
+await pub.connect();
+for (const asset of process.env.ASSETS ? process.env.ASSETS.split(',') : listed) {
   const m = src.markets[asset];
+  // Markets load on first use.
+  void m.spot;
+  const tLoad = Date.now();
+  while (!(m.spot > 0) && Date.now() - tLoad < 60_000) await new Promise((r) => setTimeout(r, 200));
+  const core = asset === 'ETH' || asset === 'BTC';
   const exps = m.expiries;
   console.log(`${asset}: index ${m.spot.toFixed(2)} · ${m.candles.length} candles over ${((m.candles.at(-1).t - m.candles[0].t) / 864e5).toFixed(0)} days · ${exps.length} expiries (${exps.map((e) => `${e.label} ${e.kind[0]}`).join(', ')})`);
   if (!(m.spot > 0)) fail(`${asset}: no index price`);
   if (m.candles.length < 300) fail(`${asset}: only ${m.candles.length} candles`);
+  const r = m.rules;
+  console.log(`   rules: tick ${r.tick} · min ${r.minAmount} · step ${r.amountStep} (loaded in ${((Date.now() - tLoad) / 1000).toFixed(1)}s)`);
+  if (!(r.tick > 0 && r.minAmount > 0 && r.amountStep > 0)) fail(`${asset}: bad contract rules ${JSON.stringify(r)}`);
+  // Newer listings have less history and shorter expiries: only hold ETH and BTC to these.
   const spanDays = (m.candles.at(-1).t - m.candles[0].t) / 864e5;
-  if (spanDays < MIN_HISTORY_DAYS) fail(`${asset}: history only covers ${spanDays.toFixed(0)} days`);
+  if (core && spanDays < MIN_HISTORY_DAYS) fail(`${asset}: history only covers ${spanDays.toFixed(0)} days`);
   const lastExp = m.expiries.at(-1);
-  if (lastExp && lastExp.ts - now < 180 * 864e5) fail(`${asset}: longest expiry ${lastExp.label} is under 6 months out`);
+  if (core && lastExp && lastExp.ts - now < 180 * 864e5) fail(`${asset}: longest expiry ${lastExp.label} is under 6 months out`);
   const last = m.candles.at(-1);
   if (Math.abs(last.c / m.spot - 1) > 0.02) fail(`${asset}: last candle ${last.c} far from index ${m.spot}`);
   if (!exps.length) fail(`${asset}: no expiries`);
@@ -61,18 +79,30 @@ for (const asset of ['ETH', 'BTC']) {
       const q = m.quote(type, k, e.ts);
       if (!q) continue;
       const model = bsPriceForCheck(type, m.spot, k, T, m.iv(type, k, e.ts, now));
-      // Deep in-the-money options can't always be matched by a spot-based model (their mark sits
-      // below spot intrinsic when the forward differs from spot); skip those.
+      // Deep in-the-money options can't always be matched by a spot-based model: Derive prices off
+      // the forward, and when nearly all of the price is intrinsic value the forward-spot gap
+      // dominates. Skip options whose time value is under 1% of their price, and ones Derive
+      // marks at 0 (far out of the money).
       const intrinsic = type === 'C' ? Math.max(m.spot - k, 0) : Math.max(k - m.spot, 0);
-      if (q.mark <= intrinsic * 1.001) continue;
+      if (q.mark <= intrinsic * 1.001 || q.mark - intrinsic < q.mark * 0.01) continue;
       const err = Math.abs(model - q.mark);
-      const tol = Math.max(0.05, q.mark * 0.005);
+      const tol = Math.max(core ? 0.05 : r.tick / 2, q.mark * 0.005);
       priced++;
-      if (err / tol > maxErr) { maxErr = err / tol; worst = `${type}${k} ${e.label}: model ${model.toFixed(2)} vs mark ${q.mark}`; }
-      if (err > tol && failures.length < 20) fail(`${asset} ${type}${k} ${e.label}: model ${model.toFixed(2)} vs Derive mark ${q.mark}`);
+      if (err / tol > maxErr) { maxErr = err / tol; worst = `${type}${k} ${e.label}: model ${model.toPrecision(4)} vs mark ${q.mark}`; }
+      if (err > tol && failures.length < 20) fail(`${asset} ${type}${k} ${e.label}: model ${model.toPrecision(4)} vs Derive mark ${q.mark}`);
     }
   }
   console.log(`   ${priced} quoted options priced; worst match ${worst || 'n/a'}`);
+
+  // Our instrument names (decimal strikes as 1_7) must be names Derive knows.
+  const e0 = exps.find((x) => x.ts - now > 3 * 864e5) ?? exps[0];
+  const sample = [...new Set([m.strikes(e0.ts)[0], m.snapStrike(m.spot, e0.ts), m.strikes(e0.ts).find((k) => !Number.isInteger(k))].filter((k) => k !== undefined))];
+  for (const k of sample) {
+    const name = instrumentName({ asset, expiry: e0.ts, strike: k, type: 'C' });
+    const ins = await pub.send('public/get_instrument', { instrument_name: name }).catch((err) => ({ error: err.message }));
+    if (ins.instrument_name !== name) fail(`${asset}: Derive doesn't know our instrument name ${name} (${ins.error ?? ins.instrument_name})`);
+  }
+  console.log(`   instrument names Derive knows: ${sample.map((k) => instrumentName({ asset, expiry: e0.ts, strike: k, type: 'C' })).join(', ')}`);
 
   // IV between quoted neighbours for an unlisted strike near spot.
   const e = exps.find((x) => x.ts - now > 5 * 864e5) ?? exps[0];
@@ -89,6 +119,7 @@ for (const asset of ['ETH', 'BTC']) {
 }
 
 src.close();
+await pub.close();
 await vite.close();
 console.log(failures.length ? `FAILED (${failures.length}):\n - ${failures.join('\n - ')}` : 'All live-data checks passed.');
 process.exit(failures.length ? 1 : 0);

@@ -6,7 +6,7 @@
 // roughly half a standard deviation of the move expected by then (wider for later expiries), and
 // every strike is a listed one.
 import type { Market } from '../data/types';
-import { YEAR, type Asset } from './market';
+import { YEAR, lotSize, type Asset } from './market';
 import { newId, type Leg } from './strategy';
 
 export interface PathPoint {
@@ -91,7 +91,8 @@ export function fitPath(path: PathPoint[], market: Market, asset: Asset, now: nu
     }
     if (!(lower < center && center < upper)) continue;
     const leg = (strike: number, side: 1 | -1, qty: number): Leg => ({ id: newId(), asset, type: 'C', side, strike, expiry, qty });
-    legs.push(leg(lower, 1, 1), leg(center, -1, 2), leg(upper, 1, 1));
+    const lot = lotSize(market.rules);
+    legs.push(leg(lower, 1, lot), leg(center, -1, 2 * lot), leg(upper, 1, lot));
     targets.push({ expiry, price, center, lower, upper });
   }
   return { legs, targets };

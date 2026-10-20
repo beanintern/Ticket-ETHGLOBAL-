@@ -8,7 +8,7 @@
 import type { DeriveClient } from '@derivexyz/derive-ts';
 import type { OptType } from '../lib/bs';
 import { BUILDER, type Instrument, type LegOrder } from './orders';
-import type { Asset } from '../lib/market';
+import { parseStrike, type Asset } from '../lib/market';
 import { NETS, type DeriveNet } from './network';
 
 export interface Credentials {
@@ -63,6 +63,11 @@ export interface AccountState {
   signer: string;
   subaccountIds: number[];
   subaccountId: number | null;
+  /**
+   * Each subaccount's margin group (Derive's risk universe id). A subaccount only trades the
+   * assets in its group: PRIME (ETH, BTC), MIDCAP (HYPE), ALT (SOL, XRP, …), RWA (XAUT).
+   */
+  groups: Record<number, number>;
   /** The key's protocol scopes, when Derive lets the key read them. */
   scopes: string[] | null;
   canTrade: boolean | null;
@@ -148,11 +153,11 @@ export function scopeAllows(grants: string[], required: string): boolean {
   });
 }
 
-/** ETH-20261030-3000-C → its parts, or null for anything that isn't an ETH/BTC option. */
+/** ETH-20261030-3000-C or ADA-20261225-1_7-P → its parts, or null for anything that isn't an option. */
 export function parseOptionName(name: string): { asset: Asset; expiryYmd: string; strike: number; type: OptType } | null {
-  const m = /^(ETH|BTC)-(\d{8})-([\d.]+)-([CP])$/.exec(name);
+  const m = /^([A-Z0-9]+)-(\d{8})-(\d+(?:_\d+)?)-([CP])$/.exec(name);
   if (!m) return null;
-  return { asset: m[1] as Asset, expiryYmd: m[2], strike: Number(m[3]), type: m[4] as OptType };
+  return { asset: m[1], expiryYmd: m[2], strike: parseStrike(m[3]), type: m[4] as OptType };
 }
 
 /** Even touching `localStorage` can throw (blocked site data), so every access is guarded. */
@@ -210,7 +215,7 @@ export class DeriveAccount {
     owner: string,
     signer: string,
   ) {
-    this.state = { status: 'connecting', error: null, owner, signer, subaccountIds: [], subaccountId: null, scopes: null, canTrade: null, portfolio: null };
+    this.state = { status: 'connecting', error: null, owner, signer, subaccountIds: [], subaccountId: null, groups: {}, scopes: null, canTrade: null, portfolio: null };
   }
 
   /** Validates the credentials, logs in over the WebSocket and starts polling the portfolio. */
@@ -289,9 +294,30 @@ export class DeriveAccount {
     void this.refresh();
   }
 
+  /** Picks up subaccounts created since login (e.g. by a deposit) and learns each one's margin group. */
+  private async refreshSubaccounts() {
+    if (!this.client) return;
+    try {
+      const ids = (await this.client.subaccounts.list()).slice().sort((a, b) => a - b);
+      this.state.subaccountIds = ids;
+      if (this.state.subaccountId === null && ids.length) this.state.subaccountId = ids[0];
+      await Promise.all(
+        ids
+          .filter((id) => this.state.groups[id] === undefined)
+          .map(async (id) => {
+            const s = await this.client!.subaccounts.get(id);
+            this.state.groups = { ...this.state.groups, [id]: s.risk_universe_id };
+          }),
+      );
+    } catch {
+      /* try again on the next refresh */
+    }
+  }
+
   async refresh() {
-    const id = this.state.subaccountId;
     if (this.closed || !this.client) return;
+    await this.refreshSubaccounts();
+    const id = this.state.subaccountId;
     if (id === null) {
       this.state.status = 'ready';
       this.emit();

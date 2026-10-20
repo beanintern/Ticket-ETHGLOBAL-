@@ -9,13 +9,14 @@ import { Chart, TOOL_LEG, type ChartView, type LegTool, type Tool } from './comp
 import { fitPath, payoffAlongPath, type PathPoint } from './lib/pathfit';
 import { betLegs, betQuestion, fmtCents, minStake, quoteBet, sizeBet, type BetQuote } from './lib/binary';
 import { EasyPanel, sellEstimate, sharePrice } from './components/EasyPanel';
+import { AssetPicker } from './components/AssetPicker';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
 import { bsPrice } from './lib/bs';
-import { price as fmtPrice, signed, signedUsd, usd } from './lib/format';
+import { fmtStrike, price as fmtPrice, signed, signedUsd, usd } from './lib/format';
 import { createSource, pickSourceKind } from './data';
 import type { Market, MarketSource } from './data/types';
-import { DAY, HOUR, MARKETS, YEAR, expiryLabel, priceAt, type Asset } from './lib/market';
+import { DAY, HOUR, MARKETS, YEAR, expiryLabel, lotSize, priceAt, type Asset } from './lib/market';
 import {
   buildModel,
   describe,
@@ -43,7 +44,9 @@ function presetLegs(preset: Preset, market: Market, now: number): Leg[] {
   };
   const atm = market.snapStrike(spot, expiry);
   const w = asset === 'ETH' ? 4 : 3;
-  const mk = (type: OptType, side: Side, strike: number): Leg => ({ id: newId(), asset, type, side, strike, expiry, qty: 1 });
+  // One lot per leg: a contract, or the asset's minimum order where that's larger.
+  const lot = lotSize(market.rules);
+  const mk = (type: OptType, side: Side, strike: number): Leg => ({ id: newId(), asset, type, side, strike, expiry, qty: lot });
   switch (preset) {
     case 'callSpread':
       return [mk('C', 1, off(atm, 1)), mk('C', -1, off(atm, 1 + w))];
@@ -70,7 +73,7 @@ function presetLegs(preset: Preset, market: Market, now: number): Leg[] {
           const strike = off(mid, (i - kinks / 2) * width, exp);
           const slope = i === kinks ? 0 : (i + phase) % 2 === 0 ? amp : -amp;
           const d = slope - prev;
-          if (d !== 0) legs.push({ id: newId(), asset, type: 'C', side: d > 0 ? 1 : -1, strike, expiry: exp, qty: Math.abs(d) });
+          if (d !== 0) legs.push({ id: newId(), asset, type: 'C', side: d > 0 ? 1 : -1, strike, expiry: exp, qty: Math.abs(d) * lot });
           prev = slope;
         }
       };
@@ -133,7 +136,7 @@ const ymd = (ts: number) => new Date(ts).toISOString().slice(0, 10).replace(/-/g
 /** The exchange account's option positions as one position per underlying, so they chart like paper ones. */
 function exchangePositions(portfolio: Portfolio | null, markets: Record<Asset, Market>): Position[] {
   if (!portfolio) return [];
-  return (Object.keys(MARKETS) as Asset[]).flatMap((asset) => {
+  return [...new Set(portfolio.positions.map((p) => p.asset))].flatMap((asset) => {
     const held = portfolio.positions.filter((p) => p.asset === asset);
     if (!held.length) return [];
     const market = markets[asset];
@@ -207,13 +210,24 @@ export default function App() {
     const t = setTimeout(() => setSlow(true), 10_000);
     return () => clearTimeout(t);
   }, []);
-  const [asset, setAsset] = useState<Asset>('ETH');
+  const [asset, setAsset] = useState<Asset>(() => {
+    try {
+      return localStorage.getItem('ticket.asset') || 'ETH';
+    } catch {
+      return 'ETH';
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('ticket.asset', asset);
+    } catch {
+      /* not remembered */
+    }
+  }, [asset]);
   const [tool, setTool] = useState<Tool>('buyC');
   const [view, setView] = useState<ChartView>({ horizon: 21 * DAY, yZoom: 1, yShift: 0 });
-  const [builder, setBuilder] = useState<Record<Asset, Leg[]>>(() => ({
-    ETH: presetLegs('callSpread', markets.ETH, Date.now()),
-    BTC: presetLegs('putSpread', markets.BTC, Date.now()),
-  }));
+  // Each asset's ticket, started with an example spread once its market has loaded (see below).
+  const [builder, setBuilder] = useState<Record<Asset, Leg[]>>(() => ({}));
   const [positions, setPositions] = useState<Position[]>(
     () => loadStore(source.kind)?.positions ?? (source.kind === 'mock' ? demoPositions(markets, Date.now()) : []),
   );
@@ -310,15 +324,13 @@ export default function App() {
   useEffect(() => source.subscribe(() => setNow(Date.now())), [source]);
 
   // Live data arrives after mount: give each market its starter spread once expiries are known.
-  const seeded = useRef(false);
+  const seeded = useRef(new Set<Asset>());
   useEffect(() => {
-    if (seeded.current || source.status !== 'ready') return;
-    seeded.current = true;
-    setBuilder((b) => ({
-      ETH: b.ETH.length ? b.ETH : presetLegs('callSpread', markets.ETH, Date.now()),
-      BTC: b.BTC.length ? b.BTC : presetLegs('putSpread', markets.BTC, Date.now()),
-    }));
-  }, [source.status, markets, now]);
+    const m = markets[asset];
+    if (seeded.current.has(asset) || !m.spot || !m.expiries.length) return;
+    seeded.current.add(asset);
+    setBuilder((b) => (b[asset]?.length ? b : { ...b, [asset]: presetLegs(asset === 'BTC' ? 'putSpread' : 'callSpread', m, Date.now()) }));
+  }, [asset, markets, now]);
   useEffect(() => () => source.close(), [source]);
 
   useEffect(() => {
@@ -339,7 +351,31 @@ export default function App() {
   const spec = market.spec;
   const spot = market.spot;
   const expiries = market.expiries;
-  const builderLegs = builder[asset];
+  const builderLegs = builder[asset] ?? [];
+
+  // Switching markets: an asset that hasn't loaded yet loads first (the picker says so) while the
+  // chart stays on the current one, then the switch happens.
+  const [pendingAsset, setPendingAsset] = useState<Asset | null>(null);
+  const switchTo = (a: Asset) => {
+    setAsset(a);
+    setPendingAsset(null);
+    setFocus({ kind: 'builder' });
+    setSelectedLegId(null);
+    setView((v) => ({ ...v, yZoom: 1, yShift: 0, nowFrac: undefined }));
+  };
+  const loaded = (a: Asset) => {
+    const m = markets[a];
+    return m.spot > 0 && m.candles.length > 0 && m.expiries.length > 0;
+  };
+  const chooseAsset = (a: Asset) => {
+    if (a === asset) return setPendingAsset(null);
+    if (loaded(a)) switchTo(a);
+    else setPendingAsset(a);
+  };
+  useEffect(() => {
+    if (pendingAsset && loaded(pendingAsset)) switchTo(pendingAsset);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAsset, now]);
   const onExchange = exchangePositions(accountState?.portfolio ?? null, markets);
   const allPositions = [...onExchange, ...positions];
   const assetPositions = allPositions.filter((p) => p.asset === asset);
@@ -438,8 +474,9 @@ export default function App() {
   const setLegs = useCallback(
     (fn: (legs: Leg[]) => Leg[]) => {
       const b = builderRef.current;
-      const next = fn(b[asset]);
-      if (next === b[asset]) return;
+      const cur = b[asset] ?? [];
+      const next = fn(cur);
+      if (next === cur) return;
       const h = history.current;
       h.past.push({ builder: b, asset });
       if (h.past.length > 200) h.past.shift();
@@ -476,20 +513,20 @@ export default function App() {
       setTab('build');
       const same = builderLegs.find((l) => l.type === type && l.strike === strike && l.expiry === expiry);
       if (!same) {
-        const leg: Leg = { id: newId(), asset, type, side, strike, expiry, qty: 1 };
+        const leg: Leg = { id: newId(), asset, type, side, strike, expiry, qty: lotSize(market.rules) };
         setSelectedLegId(leg.id);
         setLegs((legs) => [...legs, leg]);
         return;
       }
       // Clicking the same contract nets against what's already there.
-      const net = same.side * same.qty + side;
+      const net = same.side * same.qty + side * lotSize(market.rules);
       setLegs((legs) =>
         net === 0
           ? legs.filter((l) => l.id !== same.id)
           : legs.map((l) => (l.id === same.id ? { ...l, side: (net > 0 ? 1 : -1) as Side, qty: Math.abs(net) } : l)),
       );
     },
-    [asset, focus.kind, setLegs, builderLegs],
+    [asset, market, focus.kind, setLegs, builderLegs],
   );
 
   const onMove = useCallback(
@@ -555,8 +592,24 @@ export default function App() {
   // Real orders on Derive (mainnet: real USDC; testnet: test funds), while an account with a subaccount is connected.
   const subaccountId = accountState?.subaccountId ?? null;
   const canTrade = accountState?.canTrade ?? null;
+  // Margin groups: an asset's options trade only from a subaccount in its group (PRIME for ETH and
+  // BTC, ALT for SOL and most others, …). Use one that fits the asset on screen, if there is one.
+  const assetGroup = source.assets.find((a) => a.asset === asset)?.group ?? null;
+  const groups = accountState?.groups ?? {};
+  const subIds = accountState?.subaccountIds ?? [];
+  const groupsKnown = subIds.every((id) => groups[id] !== undefined);
+  const groupSubs = assetGroup ? subIds.filter((id) => groups[id] === assetGroup.id) : subIds;
+  // Strict: until a subaccount's group is known, it isn't used for this asset's orders.
+  const subFitsAsset = !assetGroup || (subaccountId !== null && groups[subaccountId] === assetGroup.id);
+  /** Connected, but no subaccount can trade this asset's options: say so instead of sending orders. */
+  const missingGroup = !!account && !!assetGroup && groupsKnown && subIds.length > 0 && groupSubs.length === 0 ? assetGroup : null;
+  useEffect(() => {
+    if (!account || !assetGroup || !groupSubs.length || subFitsAsset) return;
+    account.selectSubaccount(groupSubs[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account, asset, assetGroup?.id, groupSubs.join(','), subFitsAsset]);
   const trading = useMemo<Trading | null>(() => {
-    if (!account || subaccountId === null) return null;
+    if (!account || subaccountId === null || !subFitsAsset) return null;
     return {
       info: NETS[account.net],
       canTrade,
@@ -583,7 +636,7 @@ export default function App() {
       rfqExecute: (q) => account.rfqExecute(q),
       rfqCancel: (q) => account.rfqCancel(q.rfqId),
     };
-  }, [account, subaccountId, canTrade, markets]);
+  }, [account, subaccountId, subFitsAsset, canTrade, markets]);
 
   const reportOrders = (results: OrderResult[], what: string) => {
     const rejected = results.find((r) => !r.ok);
@@ -709,6 +762,7 @@ export default function App() {
       specs: MARKETS,
       expiries: (a: Asset = 'ETH') => markets[a].expiries.map((e) => e.ts),
       strikes: (a: Asset, expiry: number) => markets[a].strikes(expiry),
+      rules: (a: Asset) => markets[a].rules,
     };
   }, [markets]);
 
@@ -748,28 +802,7 @@ export default function App() {
           <span className="brand-mark" aria-hidden="true" />
           Ticket
         </div>
-        <nav className="markets" aria-label="Markets">
-          {(Object.keys(MARKETS) as Asset[]).map((a) => {
-            const f = markets[a];
-            const ch = (f.spot / priceAt(f.candles, now - DAY) - 1) * 100;
-            return (
-              <button
-                key={a}
-                className={`market ${a === asset ? 'is-active' : ''}`}
-                onClick={() => {
-                  setAsset(a);
-                  setFocus({ kind: 'builder' });
-                  setSelectedLegId(null);
-                  setView((v) => ({ ...v, yZoom: 1, yShift: 0, nowFrac: undefined }));
-                }}
-              >
-                <span className="market-sym">{a}</span>
-                <span className="market-px">{fmtPrice(f.spot, MARKETS[a].priceDecimals)}</span>
-                <span className={ch >= 0 ? 'up' : 'down'}>{signed(ch)}%</span>
-              </button>
-            );
-          })}
-        </nav>
+        <AssetPicker assets={source.assets} current={asset} pending={pendingAsset} onPick={chooseAsset} />
         <div className="stats">
           <div>
             <span className="label">Index</span>
@@ -798,6 +831,9 @@ export default function App() {
       {accountOpen && (
         <AccountPanel
           info={NETS[net!]}
+          asset={asset}
+          missingGroup={missingGroup?.name ?? null}
+          groupNames={Object.fromEntries(source.assets.flatMap((a) => (a.group ? [[a.group.id, a.group.name]] : [])))}
           account={accountState}
           initial={savedCreds}
           onConnect={connectAccount}
@@ -931,7 +967,7 @@ export default function App() {
             onRemove={(id) => {
               const leg = builderLegs.find((l) => l.id === id);
               onRemove(id);
-              if (leg) setToast(`Removed ${leg.side > 0 ? 'long' : 'short'} ${fmtPrice(leg.strike, 0)} ${leg.type === 'C' ? 'call' : 'put'}. Undo with ↶`);
+              if (leg) setToast(`Removed ${leg.side > 0 ? 'long' : 'short'} ${fmtStrike(leg.strike)} ${leg.type === 'C' ? 'call' : 'put'}. Undo with ↶`);
             }}
           />
           <div className="chart-legend">
@@ -997,7 +1033,7 @@ export default function App() {
               trading
                 ? { kind: 'live', trading, onBoughtLive, onSoldLive }
                 : accountEnabled
-                  ? { kind: 'connect', info: NETS[net!], onConnect: () => setAccountOpen(true) }
+                  ? { kind: 'connect', info: NETS[net!], onConnect: () => setAccountOpen(true), ...(missingGroup ? { missingGroup: missingGroup.name } : {}) }
                   : { kind: 'paper' }
             }
           />
@@ -1030,6 +1066,7 @@ export default function App() {
             accountEnabled
               ? {
                   info: NETS[net!],
+                  missingGroup: missingGroup?.name ?? null,
                   account: accountState,
                   positions: onExchange,
                   onConnect: () => setAccountOpen(true),

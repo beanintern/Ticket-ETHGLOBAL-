@@ -1,21 +1,89 @@
-// Mock market data. Everything here gets replaced by Derive's public API
-// (instruments, tickers, index price) once the integration is built.
+// Assets and their trading rules. Live data fills these in from Derive (which assets have
+// options, and each one's tick and contract sizes); the specs here are the demo market's numbers
+// and the fallbacks.
 
-export type Asset = 'ETH' | 'BTC';
+/** An underlying with options on Derive: ETH, BTC, SOL, … (Derive's currency code). */
+export type Asset = string;
 
-export interface MarketSpec {
-  asset: Asset;
-  name: string;
-  spot0: number;
-  baseIv: number;
-  strikeStep: number;
-  priceDecimals: number;
+/** Contract rules for an asset's options: price tick, smallest order and size step, in contracts. */
+export interface TradeRules {
+  tick: number;
+  minAmount: number;
+  amountStep: number;
 }
 
+export interface MarketSpec extends TradeRules {
+  asset: Asset;
+  name: string;
+  /** Demo market's starting price. */
+  spot0: number;
+  baseIv: number;
+  /** Demo market's strike spacing (near-dated). */
+  strikeStep: number;
+  priceDecimals: number;
+  /**
+   * How wide market makers quote this asset's spreads by RFQ: the preview's markup is
+   * max(tick, rfqK × √(spread's fair price × index)) per contract (see rfqEdge in binary.ts).
+   */
+  rfqK: number;
+}
+
+/** Markup multiplier for assets with too few RFQ trades to calibrate: as cautious as the widest-quoted ones. */
+export const RFQ_K_DEFAULT = 0.15;
+
+const spec = (asset: Asset, name: string, spot0: number, baseIv: number, strikeStep: number, tick: number, minAmount: number, amountStep: number, rfqK = RFQ_K_DEFAULT): MarketSpec => ({
+  asset,
+  name,
+  spot0,
+  baseIv,
+  strikeStep,
+  tick,
+  minAmount,
+  amountStep,
+  rfqK,
+  priceDecimals: priceDecimalsFor(spot0),
+});
+
+/** Decimals that show a price sensibly: 63,840 · 2,638.40 · 105.20 · 1.3042 · 0.2186 · 0.004458. */
+export function priceDecimalsFor(price: number): number {
+  const p = Math.abs(price);
+  return p >= 10000 ? 0 : p >= 10 ? 2 : p >= 0.01 ? 4 : 6;
+}
+
+/**
+ * Derive's option assets as of October 2026, in the order the picker lists them, with their
+ * contract rules from Derive's instrument listings (the live source reads them afresh), and each
+ * one's RFQ markup: the smallest that was at least what takers actually paid over mark in 97% of
+ * its two-leg vertical spreads traded by RFQ on Derive mainnet over the 30 days to 20 October 2026
+ * (`npm run check:rfq` re-checks it). ADA (3 trades), VVV and CC (none) use the cautious default.
+ */
 export const MARKETS: Record<Asset, MarketSpec> = {
-  ETH: { asset: 'ETH', name: 'Ether', spot0: 2638.4, baseIv: 0.64, strikeStep: 50, priceDecimals: 2 },
-  BTC: { asset: 'BTC', name: 'Bitcoin', spot0: 63840, baseIv: 0.52, strikeStep: 1000, priceDecimals: 0 },
+  ETH: { ...spec('ETH', 'Ether', 2638.4, 0.64, 50, 0.1, 0.1, 0.01, 0.015), priceDecimals: 2 },
+  BTC: { ...spec('BTC', 'Bitcoin', 63840, 0.52, 1000, 1, 0.01, 0.00001, 0.015), priceDecimals: 0 },
+  SOL: spec('SOL', 'Solana', 105.2, 0.75, 5, 0.1, 1, 0.1, 0.05),
+  HYPE: spec('HYPE', 'Hyperliquid', 79.47, 0.85, 5, 0.01, 10, 1, 0.04),
+  XRP: spec('XRP', 'XRP', 1.304, 0.75, 0.05, 0.0001, 100, 10, 0.08),
+  ZEC: spec('ZEC', 'Zcash', 1147, 1.0, 50, 0.1, 1, 0.1, 0.08),
+  XAUT: spec('XAUT', 'Tether Gold', 4139, 0.2, 50, 0.1, 0.1, 0.01, 0.04),
+  ADA: spec('ADA', 'Cardano', 0.2188, 0.8, 0.01, 0.0001, 1000, 100),
+  LIT: spec('LIT', 'Lighter', 3.197, 1.0, 0.25, 0.001, 50, 1, 0.19),
+  VVV: spec('VVV', 'Venice', 24.84, 1.1, 1, 0.01, 10, 1),
+  PUMP: spec('PUMP', 'Pump.fun', 0.004458, 1.1, 0.0005, 0.000001, 50000, 1000, 0.15),
+  CC: spec('CC', 'Canton', 0.1067, 0.9, 0.005, 0.00001, 1000, 100),
 };
+
+/** The spec for an asset: a known one, or defaults for one Derive lists that this app doesn't know yet. */
+export function specFor(asset: Asset, spot = 0): MarketSpec {
+  return MARKETS[asset] ?? spec(asset, asset, spot || 1, 0.8, Math.max(1e-6, (spot || 1) / 50), Math.max(1e-6, (spot || 1) / 10000), 1, 0.01);
+}
+
+/** The default order size for an asset: one contract, or Derive's minimum when that's larger (50,000 PUMP). */
+export const lotSize = (rules: TradeRules) => Math.max(1, rules.minAmount);
+
+/** How Derive writes a strike in an instrument name: 1.7 → "1_7", 2500 → "2500". */
+export const strikeCode = (k: number) => String(Number(k.toPrecision(12))).replace('.', '_');
+/** The strike in an instrument name, back to a number: "1_7" → 1.7. */
+export const parseStrike = (code: string) => Number(code.replace('_', '.'));
 
 export const MINUTE = 60e3;
 export const HOUR = 60 * MINUTE;
@@ -128,7 +196,8 @@ export function gaussian(rand: () => number = Math.random): number {
 
 /** Hourly candles ending at the current (partial) hour, walked backwards from spot0. */
 export function generateHistory(spec: MarketSpec, now: number, days = 120): Candle[] {
-  const rand = mulberry32(spec.asset === 'ETH' ? 20260925 : 1337);
+  // Fixed seeds for ETH and BTC (the chart checks replay them); others from the ticker.
+  const rand = mulberry32(spec.asset === 'ETH' ? 20260925 : spec.asset === 'BTC' ? 1337 : [...spec.asset].reduce((a, ch) => a * 31 + ch.charCodeAt(0), 7));
   const hourStart = Math.floor(now / HOUR) * HOUR;
   const subSteps = 6;
   const baseStep = spec.baseIv * 0.9 * Math.sqrt(HOUR / YEAR / subSteps);

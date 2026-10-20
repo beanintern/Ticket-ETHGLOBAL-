@@ -3,7 +3,7 @@ import type { RfqFill, RfqQuote } from '../account/derive';
 import type { Trading } from './DeriveReview';
 import { betLegs, betQuestion, fmtCents, fmtChance, MIN_BET, minStake, previewBid, rfqFee, sharePayoff, sizeBet, type BetQuote } from '../lib/binary';
 import { instrumentName } from '../account/orders';
-import { signedUsd, usd } from '../lib/format';
+import { compactUsd, fmtQty, fmtStrike, signedUsd, usd } from '../lib/format';
 import { expiryLabel, type Asset } from '../lib/market';
 import { buildModel, type Position } from '../lib/strategy';
 import type { Market } from '../data/types';
@@ -30,7 +30,8 @@ interface Props {
   /** Paper bets, a prompt to connect (Derive data, no account), or real bets on Derive by RFQ (mainnet or testnet). */
   venue:
     | { kind: 'paper' }
-    | { kind: 'connect'; info: NetInfo; onConnect: () => void }
+    /** No account, or (`missingGroup`) an account with no subaccount in this asset's margin group. */
+    | { kind: 'connect'; info: NetInfo; onConnect: () => void; missingGroup?: string }
     | {
         kind: 'live';
         trading: Trading;
@@ -50,7 +51,7 @@ export function sellEstimate(pos: Position, markets: Record<Asset, Market>, now:
   if (!pos.bet || pos.legs.length < 2) return { perShare: 0, proceeds: 0 };
   const market = markets[pos.asset];
   const [held, sold] = buildModel(pos.legs, market, now).marks;
-  const perShare = previewBid({ legPrices: [held, sold], lo: pos.bet.lo, hi: pos.bet.hi }, market.spot);
+  const perShare = previewBid({ legPrices: [held, sold], lo: pos.bet.lo, hi: pos.bet.hi }, market.spot, market.rules.tick, market.spec.rfqK);
   const fees = rfqFee(pos.legs[0].qty, [held, sold], market.spot);
   return { perShare, proceeds: Math.max(0, perShare * pos.bet.shares - fees) };
 }
@@ -125,10 +126,10 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
   // The options behind the bet, at the preview's prices (the most paid, the least received).
   const [showLegs, setShowLegs] = useState(false);
   const underlying = pending
-    ? betLegs(pending, shares).map((l, i) => ({ instrument: instrumentName(l), buy: l.side > 0, amount: l.qty.toFixed(2), price: pending.previewLegPrices[i] }))
+    ? betLegs(pending, shares).map((l, i) => ({ instrument: instrumentName(l), buy: l.side > 0, amount: fmtQty(l.qty), price: pending.previewLegPrices[i] }))
     : [];
   const u0Text = pending
-    ? `Each contract is on 1 ${pending.asset}. The two strikes are $${(pending.hi - pending.lo).toLocaleString('en-US')} apart, so ${underlying[0]?.amount ?? '–'} contracts pay up to $${shares.toFixed(2)}: $1 for each of your ${shares.toFixed(1)} shares.`
+    ? `Each contract is on 1 ${pending.asset}. The two strikes are $${fmtStrike(pending.hi - pending.lo)} apart, so ${underlying[0]?.amount ?? '–'} contracts pay up to $${shares.toFixed(2)}: $1 for each of your ${shares.toFixed(1)} shares.`
     : '';
   // On narrow screens the card sits below the chart: bring it into view when a bet is picked.
   const cardRef = useRef<HTMLDivElement>(null);
@@ -198,7 +199,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               </button>
             </div>
             <h2>
-              Will {asset} be {pending.dir} ${Math.round(pending.level).toLocaleString('en-US')} on {expiryLabel(pending.expiry)}?
+              Will {asset} be {pending.dir} ${fmtStrike(pending.level)} on {expiryLabel(pending.expiry)}?
             </h2>
             <div className="bet-price">
               <span className="num">{cents(pending.preview)}</span>
@@ -307,10 +308,22 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                   Buy Yes · {size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}
                   {venue.kind === 'connect' ? ' (paper)' : ''}
                 </button>
-                {venue.kind === 'connect' && (
-                  <button className="link" onClick={venue.onConnect}>
-                    Connect your {venue.info.name} account to bet for real ({venue.info.real ? 'USDC' : 'test funds'})
-                  </button>
+                {venue.kind === 'connect' && venue.missingGroup ? (
+                  <>
+                    <p className="fine">
+                      {asset} options trade in Derive's {venue.missingGroup} margin group, and your account has no subaccount there yet. Deposit USDC into one to
+                      bet on {asset} for real.
+                    </p>
+                    <button className="link" onClick={venue.onConnect}>
+                      Set up {asset} trading
+                    </button>
+                  </>
+                ) : (
+                  venue.kind === 'connect' && (
+                    <button className="link" onClick={venue.onConnect}>
+                      Connect your {venue.info.name} account to bet for real ({venue.info.real ? 'USDC' : 'test funds'})
+                    </button>
+                  )
                 )}
               </>
             )}
@@ -331,7 +344,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                         <td className="num">
                           {u.amount} × {u.instrument}
                         </td>
-                        <td className="num">{usd(u.price)}</td>
+                        <td className="num">{compactUsd(u.price)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -343,7 +356,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               {(() => {
                 const [win, lose] = pending.dir === 'above' ? [pending.hi, pending.lo] : [pending.lo, pending.hi];
                 const [winWord, loseWord] = pending.dir === 'above' ? ['above', 'below'] : ['below', 'above'];
-                return `Pays $1 per share if ${asset} settles ${winWord} $${win.toLocaleString('en-US')} on ${expiryLabel(pending.expiry)}, nothing ${loseWord} $${lose.toLocaleString('en-US')}, and part-way in between. Built from a ${pending.lo}/${pending.hi} ${pending.dir === 'above' ? 'call' : 'put'} spread; you can sell any time before. ${live ? `On ${live.trading.info.name}${live.trading.info.real ? ' with real USDC' : ''}: market makers quote both options as one package, which fills whole or not at all.` : 'Paper trade, at the price shown.'}`;
+                return `Pays $1 per share if ${asset} settles ${winWord} $${fmtStrike(win)} on ${expiryLabel(pending.expiry)}, nothing ${loseWord} $${fmtStrike(lose)}, and part-way in between. Built from a ${pending.lo}/${pending.hi} ${pending.dir === 'above' ? 'call' : 'put'} spread; you can sell any time before. ${live ? `On ${live.trading.info.name}${live.trading.info.real ? ' with real USDC' : ''}: market makers quote both options as one package, which fills whole or not at all.` : 'Paper trade, at the price shown.'}`;
               })()}
             </p>
           </div>

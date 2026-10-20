@@ -5,8 +5,8 @@
 // plus subscriptions), which also avoids CORS: the REST endpoints don't allow browser origins
 // other than Derive's own. Read-only: no account, keys or signing are involved here.
 import { bsPrice, type OptType } from '../lib/bs';
-import { DAY, HOUR, MARKETS, YEAR, expiryLabel, type Asset, type Candle, type Expiry, type ExpiryKind } from '../lib/market';
-import type { Market, MarketSource, Quote } from './types';
+import { DAY, HOUR, MARKETS, YEAR, expiryLabel, parseStrike, specFor, type Asset, type Candle, type Expiry, type ExpiryKind, type MarketSpec, type TradeRules } from '../lib/market';
+import type { AssetInfo, Market, MarketSource, Quote } from './types';
 
 export interface DeriveNetwork {
   kind: 'live' | 'testnet';
@@ -15,9 +15,12 @@ export interface DeriveNetwork {
 
 export const DERIVE_MAINNET: DeriveNetwork = { kind: 'live', url: 'wss://api.derive.xyz/v3/ws' };
 export const DERIVE_TESTNET: DeriveNetwork = { kind: 'testnet', url: 'wss://testnet.api.derive.xyz/v3/ws' };
-const ASSETS: Asset[] = ['ETH', 'BTC'];
-/** How often every expiry's quotes are re-fetched. */
+/** How often the quotes of assets in use are re-fetched. */
 const QUOTE_REFRESH_MS = 10_000;
+/** How often the asset list (prices, 24h change, new listings) is re-fetched. */
+const ASSETS_REFRESH_MS = 15_000;
+/** An asset counts as in use (keeps its quotes fresh) this long after it was last looked at. */
+const IN_USE_MS = 60_000;
 
 type Json = Record<string, unknown>;
 
@@ -149,6 +152,12 @@ interface RawQuote extends Quote {
 }
 
 interface LiveState {
+  spec: MarketSpec;
+  rules: TradeRules;
+  /** Load started; finished once candles and expiries are in. */
+  loading: boolean;
+  loaded: boolean;
+  lastUsed: number;
   spot: number;
   candles: Candle[];
   expiries: Expiry[];
@@ -159,8 +168,8 @@ interface LiveState {
 
 const qkey = (expiry: number, strike: number, type: OptType) => `${expiry}|${strike}|${type}`;
 
-function liveMarket(asset: Asset, st: LiveState): Market {
-  const spec = MARKETS[asset];
+function liveMarket(asset: Asset, st: LiveState, touch: () => void): Market {
+  const spec = st.spec;
   const nearestExpiry = (ts: number) =>
     st.expiries.reduce((a, e) => (Math.abs(e.ts - ts) < Math.abs(a - ts) ? e.ts : a), st.expiries[0]?.ts ?? ts);
   const strikesFor = (expiry: number) => st.strikesByExpiry.get(expiry) ?? st.strikesByExpiry.get(nearestExpiry(expiry)) ?? [];
@@ -176,7 +185,11 @@ function liveMarket(asset: Asset, st: LiveState): Market {
     asset,
     spec,
     get spot() {
-      return st.spot;
+      touch();
+      return st.loaded ? st.spot : 0;
+    },
+    get rules() {
+      return st.rules;
     },
     get candles() {
       return st.candles;
@@ -223,14 +236,47 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
   const sock = new DeriveSocket(network.url);
   const listeners = new Set<() => void>();
   const notify = () => listeners.forEach((cb) => cb());
-  const states = {} as Record<Asset, LiveState>;
-  for (const a of ASSETS) states[a] = { spot: 0, candles: [], expiries: [], strikesByExpiry: new Map(), quotes: new Map() };
+  let assets: AssetInfo[] = [];
+  const states = new Map<Asset, LiveState>();
+  const made = new Map<Asset, Market>();
+
+  /** An asset's state, created (and its options loaded) the first time it's asked for. */
+  const stateOf = (asset: Asset): LiveState => {
+    let st = states.get(asset);
+    if (!st) {
+      const spec = specFor(asset, assets.find((a) => a.asset === asset)?.spot);
+      st = { spec, rules: { tick: spec.tick, minAmount: spec.minAmount, amountStep: spec.amountStep }, loading: false, loaded: false, lastUsed: Date.now(), spot: 0, candles: [], expiries: [], strikesByExpiry: new Map(), quotes: new Map() };
+      states.set(asset, st);
+    }
+    return st;
+  };
+  const marketOf = (asset: Asset): Market => {
+    let m = made.get(asset);
+    if (!m) {
+      const st = stateOf(asset);
+      m = liveMarket(asset, st, () => {
+        st.lastUsed = Date.now();
+        if (!st.loading) void loadAsset(asset);
+      });
+      made.set(asset, m);
+    }
+    return m;
+  };
+  const markets = new Proxy({} as Record<Asset, Market>, {
+    get: (_t, a) => (typeof a === 'string' ? marketOf(a) : undefined),
+    has: (_t, a) => typeof a === 'string',
+    ownKeys: () => assets.map((a) => a.asset),
+    getOwnPropertyDescriptor: (_t, a) => (typeof a === 'string' ? { enumerable: true, configurable: true, value: marketOf(a) } : undefined),
+  });
 
   const source: MarketSource & { status: MarketSource['status']; error: string | null } = {
     kind: network.kind,
     status: 'connecting',
     error: null,
-    markets: { ETH: liveMarket('ETH', states.ETH), BTC: liveMarket('BTC', states.BTC) },
+    get assets() {
+      return assets;
+    },
+    markets,
     subscribe(cb) {
       listeners.add(cb);
       return () => listeners.delete(cb);
@@ -238,6 +284,7 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
     close() {
       closed = true;
       clearInterval(refreshTimer);
+      clearInterval(assetsTimer);
       sock.close();
     },
   };
@@ -249,7 +296,7 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
   };
 
   const onSpot = (asset: Asset, price: number, ts: number) => {
-    const st = states[asset];
+    const st = stateOf(asset);
     st.spot = price;
     const hour = Math.floor(ts / HOUR) * HOUR;
     const last = st.candles[st.candles.length - 1];
@@ -263,7 +310,14 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
   };
 
   async function loadInstruments(asset: Asset) {
-    type Instr = { instrument_name: string; is_active: boolean; option_details: { expiry: number; strike: string; option_type: OptType } };
+    type Instr = {
+      instrument_name: string;
+      is_active: boolean;
+      tick_size: string;
+      minimum_amount: string;
+      amount_step: string;
+      option_details: { expiry: number; strike: string; option_type: OptType };
+    };
     let list: Instr[] = [];
     // Paginated, at most 1000 per page.
     for (let page = 1; ; page++) {
@@ -285,7 +339,10 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
       if (!byExpiry.has(ts)) byExpiry.set(ts, new Set());
       byExpiry.get(ts)!.add(k);
     }
-    const st = states[asset];
+    const st = stateOf(asset);
+    // The asset's contract rules, from its listings (the same for all its options).
+    const first = list.find((x) => x.is_active !== false);
+    if (first) st.rules = { tick: num(first.tick_size) ?? st.rules.tick, minAmount: num(first.minimum_amount) ?? st.rules.minAmount, amountStep: num(first.amount_step) ?? st.rules.amountStep };
     st.strikesByExpiry = new Map([...byExpiry].map(([ts, ks]) => [ts, [...ks].sort((a, b) => a - b)]));
     st.expiries = [...byExpiry.keys()].sort((a, b) => a - b).map((ts) => ({ ts, kind: expiryKind(ts), label: expiryLabel(ts) }));
   }
@@ -304,7 +361,7 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
       .filter((c) => [c.o, c.h, c.l, c.c].every(Number.isFinite) && (c.daily ? c.t < hourlyFrom : c.t >= hourlyFrom))
       .sort((a, b) => a.t - b.t)
       .map(({ t, o, h, l, c }) => ({ t, o, h, l, c }));
-    const st = states[asset];
+    const st = stateOf(asset);
     st.candles = candles;
     if (!st.spot && candles.length) st.spot = candles[candles.length - 1].c;
   }
@@ -312,53 +369,123 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
   async function loadQuotes(asset: Asset, expiry: number) {
     type Tk = { M: string; b: string; a: string; I: string; option_pricing: { i: string } | null };
     const res = await sock.call<{ tickers: Record<string, Tk> }>('public/get_tickers', { instrument_type: 'option', currency: asset, expiry_date: ymd(expiry) });
-    const st = states[asset];
+    const st = stateOf(asset);
     for (const [name, t] of Object.entries(res.tickers)) {
       // ETH-20261030-3000-C
       const parts = name.split('-');
       const type = parts[3] as OptType;
-      const strike = Number(parts[2]);
+      const strike = parseStrike(parts[2]);
       const mark = num(t.M);
       if (mark === null || !Number.isFinite(strike)) continue;
       const bid = num(t.b);
       const ask = num(t.a);
-      const deriveIv = num(t.option_pricing?.i) ?? MARKETS[asset].baseIv;
+      const deriveIv = num(t.option_pricing?.i) ?? st.spec.baseIv;
       st.quotes.set(qkey(expiry, strike, type), { mark, bid: bid && bid > 0 ? bid : null, ask: ask && ask > 0 ? ask : null, iv: deriveIv, deriveIv });
       if (!st.spot) st.spot = num(t.I) ?? st.spot;
     }
   }
 
-  async function refreshAllQuotes() {
+  async function loadAllQuotes(asset: Asset) {
     const now = Date.now();
-    for (const a of ASSETS) {
-      for (const e of states[a].expiries) {
-        if (closed) return;
-        if (e.ts <= now) continue;
-        await loadQuotes(a, e.ts).catch(() => {});
-      }
+    for (const e of stateOf(asset).expiries) {
+      if (closed) return;
+      if (e.ts > now) await loadQuotes(asset, e.ts).catch(() => {});
+    }
+  }
+
+  /** Loads an asset's options the first time it's used: listings, history, live index and quotes. */
+  async function loadAsset(asset: Asset) {
+    const st = stateOf(asset);
+    st.loading = true;
+    try {
+      await Promise.all([loadInstruments(asset), loadHistory(asset)]);
+      sock.subscribe(`spot_feed.${asset}`, (data) => {
+        const feeds = data.feeds as Record<string, { price: string }> | undefined;
+        const p = num(feeds?.[asset]?.price);
+        if (p) {
+          onSpot(asset, p, Number(data.timestamp) || Date.now());
+          notify();
+        }
+      });
+      await loadAllQuotes(asset);
+      st.loaded = true;
+      notify();
+    } catch (e) {
+      // Let the next use try again.
+      st.loading = false;
+      source.error = `Couldn't load ${asset} from Derive: ${(e as Error).message}`;
       notify();
     }
   }
 
+  // Whether each asset has options trading right now (some are set up with none active yet).
+  const tradable = new Map<Asset, { yes: boolean; at: number }>();
+  async function hasActiveOptions(asset: Asset): Promise<boolean> {
+    const known = tradable.get(asset);
+    if (known && Date.now() - known.at < 10 * 60_000) return known.yes;
+    type Page = { instruments: { is_active: boolean }[] };
+    const res = await sock.call<Page>('public/get_all_instruments', { currency: asset, instrument_type: 'option', expired: false, page: 1, page_size: 1000 });
+    const yes = res.instruments.some((i) => i.is_active !== false);
+    tradable.set(asset, { yes, at: Date.now() });
+    return yes;
+  }
+
+  /** Every asset with options trading on Derive, with its price and 24-hour change, known assets first. */
+  async function loadAssets() {
+    type Cur = {
+      currency: string;
+      spot_price: string;
+      spot_price_24h: string | null;
+      option?: { universes?: { risk_universe_id: number; risk_universe_name: string }[] } | null;
+    };
+    const list = await sock.call<Cur[]>('public/get_all_currencies', {});
+    const order = Object.keys(MARKETS);
+    const rank = (a: string) => (order.includes(a) ? order.indexOf(a) : order.length);
+    const withOptions = list.filter((c) => c.option);
+    // "Instrument not found" means none listed; on any other error keep what was known (or show it).
+    const active = await Promise.all(
+      withOptions.map((c) =>
+        hasActiveOptions(c.currency).catch((e: Error) => (/not found|12001/i.test(e.message) ? false : (tradable.get(c.currency)?.yes ?? true))),
+      ),
+    );
+    assets = withOptions
+      .filter((_, i) => active[i])
+      .map((c) => {
+        const spot = num(c.spot_price) ?? 0;
+        const before = num(c.spot_price_24h);
+        const u = c.option?.universes?.[0];
+        return {
+          asset: c.currency,
+          name: specFor(c.currency, spot).name,
+          spot,
+          change24h: before ? spot / before - 1 : null,
+          group: u ? { id: u.risk_universe_id, name: u.risk_universe_name } : undefined,
+        };
+      })
+      .sort((a, b) => rank(a.asset) - rank(b.asset) || a.asset.localeCompare(b.asset));
+  }
+
+  async function refreshInUse() {
+    const now = Date.now();
+    for (const [a, st] of states) {
+      if (closed) return;
+      if (st.loaded && now - st.lastUsed < IN_USE_MS) {
+        await loadAllQuotes(a);
+        notify();
+      }
+    }
+  }
+
   let refreshTimer = 0 as unknown as ReturnType<typeof setInterval>;
+  let assetsTimer = 0 as unknown as ReturnType<typeof setInterval>;
   (async () => {
     try {
-      await Promise.all(ASSETS.flatMap((a) => [loadInstruments(a), loadHistory(a)]));
-      for (const a of ASSETS) {
-        sock.subscribe(`spot_feed.${a}`, (data) => {
-          const feeds = data.feeds as Record<string, { price: string }> | undefined;
-          const p = num(feeds?.[a]?.price);
-          if (p) {
-            onSpot(a, p, Number(data.timestamp) || Date.now());
-            notify();
-          }
-        });
-      }
-      await refreshAllQuotes();
+      await loadAssets();
       source.status = 'ready';
       source.error = null;
       notify();
-      refreshTimer = setInterval(() => void refreshAllQuotes(), QUOTE_REFRESH_MS);
+      refreshTimer = setInterval(() => void refreshInUse(), QUOTE_REFRESH_MS);
+      assetsTimer = setInterval(() => void loadAssets().then(notify, () => {}), ASSETS_REFRESH_MS);
     } catch (e) {
       source.status = 'error';
       source.error = `Couldn't load Derive market data: ${(e as Error).message}`;

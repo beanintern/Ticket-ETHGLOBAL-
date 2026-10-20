@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import type { OptType } from '../lib/bs';
 import { bsPrice } from '../lib/bs';
-import { compactUsd, price as fmtPrice, signedUsd } from '../lib/format';
+import { compactUsd, decimalsForStep, fmtStrike, price as fmtPrice, signedUsd } from '../lib/format';
 import {
   DAY,
   HOUR,
   YEAR,
+  lotSize,
   type Candle,
   type Expiry,
   type MarketSpec,
@@ -523,7 +524,10 @@ export function Chart(props: Props) {
     ctx.font = `11px ${MONO}`;
     ctx.textBaseline = 'middle';
     const spotY = pToY(spot);
-    for (let v = Math.ceil(g.lo / pStep) * pStep; v <= g.hi; v += pStep) {
+    const pDec = decimalsForStep(pStep);
+    // Counted in steps, so small steps (0.0005) don't drift into float noise.
+    for (let i = Math.ceil(g.lo / pStep); i * pStep <= g.hi; i++) {
+      const v = i * pStep;
       const y = Math.round(pToY(v)) + 0.5;
       if (Math.abs(y - spotY) < 14) continue;
       ctx.strokeStyle = C.grid;
@@ -533,7 +537,7 @@ export function Chart(props: Props) {
       ctx.stroke();
       ctx.fillStyle = C.muted;
       ctx.textAlign = 'left';
-      ctx.fillText(fmtPrice(v, pStep < 1 ? 2 : 0), plotR + PW + 8, y);
+      ctx.fillText(fmtPrice(v, pDec), plotR + PW + 8, y);
     }
 
     // ---- Time grid + axis ----
@@ -708,7 +712,7 @@ export function Chart(props: Props) {
       const strikeLabel = (y: number) => {
         const p = yToP(y);
         const k = legsForPnl.reduce((a, l) => (Math.abs(l.strike - p) < Math.abs(a - p) ? l.strike : a), legsForPnl[0].strike);
-        return fmtPrice(Math.abs(k - p) / p < 0.03 ? k : p, 0);
+        return fmtStrike(Math.abs(k - p) / p < 0.03 ? k : p);
       };
       const nearest = (rs: [number, number][]) =>
         rs.reduce((a, r) => (Math.abs((r[0] + r[1]) / 2 - spotY) < Math.abs((a[0] + a[1]) / 2 - spotY) ? r : a), rs[0]);
@@ -1171,7 +1175,7 @@ export function Chart(props: Props) {
         ctx.fillText(title, lx + 24, ly + 12);
         ctx.font = `11px ${SANS}`;
         ctx.fillStyle = C.muted;
-        ctx.fillText(sub.replace('{edge}', fmtPrice(edgeP, 0)), lx + 9, ly + 26);
+        ctx.fillText(sub.replace('{edge}', fmtStrike(edgeP)), lx + 9, ly + 26);
       };
       if (unlimitedLoss) tag('up', 'loss', 'LOSS UNCAPPED', 'loses above {edge}, no limit');
       else if (unlimitedProfit) tag('up', 'profit', 'PROFIT UNCAPPED', 'profits above {edge}, no limit');
@@ -1246,7 +1250,7 @@ export function Chart(props: Props) {
       ctx.lineWidth = 1;
       ctx.globalAlpha = 1;
       if (!isStatic && !ghost) {
-        const label = `${l.side > 0 ? 'Long' : 'Short'} ${l.qty} × ${fmtPrice(l.strike, 0)} ${l.type === 'C' ? 'Call' : 'Put'} · ${fmtTime(l.expiry, false)}`;
+        const label = `${l.side > 0 ? 'Long' : 'Short'} ${l.qty} × ${fmtStrike(l.strike)} ${l.type === 'C' ? 'Call' : 'Put'} · ${fmtTime(l.expiry, false)}`;
         markers.push({ id: l.id, x: x - 10, y: y - 10, w: 20, h: 20, label, color: col });
       }
     };
@@ -1315,7 +1319,7 @@ export function Chart(props: Props) {
       const from = dragGroup.groupFrom!;
       const dK = dragGroup.groupTo[0].strike - from[0].strike;
       const top = dragGroup.groupTo.reduce((a, l) => (pToY(l.strike) < pToY(a.strike) ? l : a));
-      const text = `${dK === 0 ? '±0' : `${dK > 0 ? '+' : '−'}${fmtPrice(Math.abs(dK), 0)}`} · ${[...new Set(dragGroup.groupTo.map((l) => fmtTime(l.expiry, false)))].join(', ')}`;
+      const text = `${dK === 0 ? '±0' : `${dK > 0 ? '+' : '−'}${fmtStrike(Math.abs(dK))}`} · ${[...new Set(dragGroup.groupTo.map((l) => fmtTime(l.expiry, false)))].join(', ')}`;
       ctx.font = `600 11px ${MONO}`;
       const tw = ctx.measureText(text).width + 12;
       const sx = Math.min(tToX(top.expiry), plotR - 2);
@@ -1342,7 +1346,7 @@ export function Chart(props: Props) {
       ctx.stroke();
       ctx.setLineDash([]);
       if (leg) {
-        const text = `${fmtPrice(dragLeg.strike!, 0)} ${leg.type} · ${fmtTime(dragLeg.expiry!, false)}`;
+        const text = `${fmtStrike(dragLeg.strike!)} ${leg.type} · ${fmtTime(dragLeg.expiry!, false)}`;
         ctx.font = `600 11px ${MONO}`;
         const tw = ctx.measureText(text).width + 12;
         const tx = Math.min(plotR - tw - 2, sx + 14);
@@ -1477,13 +1481,13 @@ export function Chart(props: Props) {
     }
     if (snap && isLegTool(tool) && !overMarker) {
       const tl = TOOL_LEG[tool];
-      const ghost: Leg = { id: '__ghost', asset: spec.asset, type: tl.type, side: tl.side, strike: snap.strike, expiry: snap.expiry, qty: 1 };
+      const ghost: Leg = { id: '__ghost', asset: spec.asset, type: tl.type, side: tl.side, strike: snap.strike, expiry: snap.expiry, qty: lotSize(market.rules) };
       drawLeg(ghost, true);
       const T = (snap.expiry - now) / YEAR;
       const iv = market.iv(tl.type, snap.strike, snap.expiry, now);
       const prem = bsPrice(tl.type, spot, snap.strike, T, iv);
       ghostInfo = [
-        `${tl.label} ${fmtPrice(snap.strike, 0)} · ${fmtTime(snap.expiry, false)}`,
+        `${tl.label} ${fmtStrike(snap.strike)} · ${fmtTime(snap.expiry, false)}`,
         `${tl.side > 0 ? 'Pay' : 'Receive'} ${compactUsd(prem)} · IV ${(iv * 100).toFixed(1)}%`,
       ];
     }
@@ -1548,7 +1552,7 @@ export function Chart(props: Props) {
 
     // Spot tag on the axis.
     ctx.font = `600 11px ${MONO}`;
-    const sLabel = fmtPrice(spot, narrow ? 0 : spec.priceDecimals);
+    const sLabel = fmtPrice(spot, narrow ? Math.max(0, spec.priceDecimals - 2) : spec.priceDecimals);
     roundRect(ctx, plotR + PW + 2, sy - 9, AW - 4, 18, 3);
     ctx.fillStyle = C.text;
     ctx.fill();
@@ -1577,7 +1581,7 @@ export function Chart(props: Props) {
       ctx.fill();
       ctx.fillStyle = C.text;
       ctx.font = `11px ${MONO}`;
-      ctx.fillText(fmtPrice(hp, hp < 100 ? 2 : 0), plotR + PW + 7, hy + 0.5);
+      ctx.fillText(fmtPrice(hp, Math.max(pDec, spec.priceDecimals)), plotR + PW + 7, hy + 0.5);
 
       const lines: { text: string; color?: string; bold?: boolean }[] = [];
       const ht = xToT(hover.x);
@@ -1597,7 +1601,7 @@ export function Chart(props: Props) {
             lines.push({ text: 'Click to bet · firm price when you buy', color: C.muted });
           }
         }
-        if (!easyInfo) lines.push({ text: `${fmtTime(ht, true)} UTC · ${fmtPrice(hp, hp < 100 ? 2 : 0)}`, color: C.muted });
+        if (!easyInfo) lines.push({ text: `${fmtTime(ht, true)} UTC · ${fmtPrice(hp, Math.max(pDec, spec.priceDecimals))}`, color: C.muted });
         if (legsForPnl.length) {
           const v = pnlFn(hp, ht);
           lines.push({ text: `Position P&L ${signedUsd(v)}`, bold: true, color: v >= 0 ? `rgb(${C.profit.join(',')})` : `rgb(${C.loss.join(',')})` });

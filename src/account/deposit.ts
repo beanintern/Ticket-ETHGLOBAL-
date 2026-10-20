@@ -3,8 +3,8 @@
 // A deposit is two on-chain transactions the wallet signs and pays gas for, on the network's
 // chain (Ethereum for mainnet, Sepolia for the testnet):
 //   1. approve: let Derive's ActionManager pull the USDC (skipped if already allowed);
-//   2. deposit: into an existing subaccount, or into a new one (which creates the Derive account,
-//      under the margin manager for ETH and BTC options).
+//   2. deposit: into an existing subaccount, or into a new one (creating the Derive account the
+//      first time), under the margin manager of the group that trades the asset's options.
 // Derive credits it a little later, once it sees the transaction; `pendingDeposits` shows it in the
 // meantime. Which token, protocol asset, manager and minimum to use all come from Derive's own
 // risk-universe listing, not constants here.
@@ -46,18 +46,20 @@ async function publicClient(net: DeriveNet) {
   return client;
 }
 
-/** Where a USDC deposit for ETH/BTC options goes, read from Derive's risk universes. */
-export async function depositTarget(net: DeriveNet): Promise<DepositTarget> {
+/**
+ * Where a USDC deposit for an asset's options goes, read from Derive's risk universes: the
+ * standard-margin manager of the group that trades them (PRIME for ETH and BTC, ALT for SOL, …).
+ */
+export async function depositTarget(net: DeriveNet, asset = 'ETH'): Promise<DepositTarget> {
   const client = await publicClient(net);
   try {
     const universes = await client.marketData.getRiskUniverses();
     const managers = universes.flatMap((u) => u.managers);
-    // Standard margin over ETH and BTC options; portfolio margin is for larger, hedged books.
-    const m =
-      managers.find((x) => x.margin_type === 'SM' && x.instruments.includes('ETH-OPTION') && x.instruments.includes('BTC-OPTION')) ??
-      managers.find((x) => x.instruments.includes('ETH-OPTION') && x.instruments.includes('BTC-OPTION'));
+    const option = `${asset}-OPTION`;
+    // Standard margin; portfolio margin is for larger, hedged books.
+    const m = managers.find((x) => x.margin_type === 'SM' && x.instruments.includes(option)) ?? managers.find((x) => x.instruments.includes(option));
     const usdc = m?.collaterals.find((c) => c.name === 'USDC');
-    if (!m || !usdc?.erc20?.underlying_erc20) throw new Error('Derive didn’t list a USDC deposit for ETH and BTC options.');
+    if (!m || !usdc?.erc20?.underlying_erc20) throw new Error(`Derive didn’t list a USDC deposit for ${asset} options.`);
     return {
       managerId: m.manager_id,
       asset: usdc.address,

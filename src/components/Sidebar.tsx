@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react';
 import type { Focus, Preset } from '../App';
-import { compactUsd, price as fmtPrice, signed, signedUsd, usd } from '../lib/format';
+import { compactUsd, fmtQty, fmtStrike, price as fmtPrice, signed, signedUsd, usd } from '../lib/format';
 import type { AccountState, OrderResult } from '../account/derive';
 import { DeriveReview, type Trading } from './DeriveReview';
 import type { NetInfo } from '../account/network';
 import type { Market } from '../data/types';
-import { expiryLabel, type Asset, type MarketSpec } from '../lib/market';
+import { expiryLabel, lotSize, type Asset, type MarketSpec } from '../lib/market';
+import { instrumentName } from '../account/orders';
 import {
   buildModel,
   daysLeft,
@@ -43,6 +44,8 @@ interface Props {
   /** The Derive account (connected or not), or null when accounts aren't available (demo data). */
   exchange: {
     info: NetInfo;
+    /** Connected, but no subaccount in this asset's margin group (its name), or null. */
+    missingGroup: string | null;
     account: AccountState | null;
     positions: Position[];
     onConnect: () => void;
@@ -102,6 +105,7 @@ function Builder({
   exchange,
 }: Props) {
   const market = markets[spec.asset];
+  const lot = lotSize(market.rules);
   const spot = market.spot;
   const [reviewing, setReviewing] = useState(false);
   const summary = useMemo(() => summarize(model, market, now), [model, market, now]);
@@ -169,7 +173,7 @@ function Builder({
             <div className="wide">
               <dt>Break-even at {expiryLabel(summary.horizon)}</dt>
               <dd className="num">
-                {summary.breakevens.length ? summary.breakevens.map((b) => fmtPrice(b, spec.priceDecimals > 0 ? 1 : 0)).join('  ·  ') : 'None'}
+                {summary.breakevens.length ? summary.breakevens.map((b) => fmtPrice(b, spec.priceDecimals > 0 ? Math.max(1, spec.priceDecimals - 1) : 0)).join('  ·  ') : 'None'}
               </dd>
             </div>
           </dl>
@@ -222,7 +226,7 @@ function Builder({
                       <button onClick={(e) => (e.stopPropagation(), onUpdateLeg(l.id, { strike: market.stepStrike(l.strike, l.expiry, -1) }))} aria-label="Lower strike">
                         −
                       </button>
-                      <span className="num">{fmtPrice(l.strike, 0)}</span>
+                      <span className="num">{fmtStrike(l.strike)}</span>
                       <button onClick={(e) => (e.stopPropagation(), onUpdateLeg(l.id, { strike: market.stepStrike(l.strike, l.expiry, 1) }))} aria-label="Raise strike">
                         +
                       </button>
@@ -257,11 +261,11 @@ function Builder({
                       ))}
                     </select>
                     <div className="stepper small" aria-label="Contracts">
-                      <button onClick={(e) => (e.stopPropagation(), onUpdateLeg(l.id, { qty: Math.max(1, l.qty - 1) }))} aria-label="Fewer contracts">
+                      <button onClick={(e) => (e.stopPropagation(), onUpdateLeg(l.id, { qty: Math.max(lot, l.qty - lot) }))} aria-label="Fewer contracts">
                         −
                       </button>
-                      <span className="num">×{l.qty}</span>
-                      <button onClick={(e) => (e.stopPropagation(), onUpdateLeg(l.id, { qty: l.qty + 1 }))} aria-label="More contracts">
+                      <span className="num">×{fmtQty(l.qty)}</span>
+                      <button onClick={(e) => (e.stopPropagation(), onUpdateLeg(l.id, { qty: l.qty + lot }))} aria-label="More contracts">
                         +
                       </button>
                     </div>
@@ -302,7 +306,7 @@ function Builder({
                       <tr key={l.id}>
                         <td className={l.side > 0 ? 'long' : 'short'}>{l.side > 0 ? 'Buy' : 'Sell'}</td>
                         <td>
-                          {l.qty} × {spec.asset}-{expiryLabel(l.expiry).replace(' ', '')}-{l.strike}-{l.type}
+                          {l.qty.toLocaleString('en-US')} × {instrumentName(l)}
                         </td>
                         <td className="num">{usd(model.marks[i])}</td>
                       </tr>
@@ -313,7 +317,15 @@ function Builder({
                   <span>{debit >= 0 ? 'You pay' : 'You receive'}</span>
                   <b className="num">{usd(debit)}</b>
                 </div>
-                {exchange ? (
+                {exchange?.missingGroup ? (
+                  <p className="fine">
+                    Paper trade. {spec.asset} options trade in Derive's {exchange.missingGroup} margin group, and your account has no subaccount there yet.{' '}
+                    <button className="link" onClick={exchange.onConnect}>
+                      Set up {spec.asset} trading
+                    </button>{' '}
+                    to place real orders.
+                  </p>
+                ) : exchange ? (
                   <p className="fine">
                     Paper trade.{' '}
                     <button className="link" onClick={exchange.onConnect}>
@@ -445,7 +457,7 @@ function PositionCard({
               {l.side > 0 ? '+' : '−'}
               {l.qty}
             </span>{' '}
-            {fmtPrice(l.strike, 0)} {l.type} · {expiryLabel(l.expiry)}
+            {fmtStrike(l.strike)} {l.type} · {expiryLabel(l.expiry)}
             <span className="pos-leg-px">
               {compactUsd(model.entries[i])} → {compactUsd(model.marks[i])}
             </span>

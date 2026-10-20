@@ -16,13 +16,17 @@ import { DeriveClient } from '@derivexyz/derive-ts';
 
 const vite = await createServer({ server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
 const { rfqEdge, rfqFee } = await vite.ssrLoadModule('/src/lib/binary.ts');
+const { MARKETS, specFor } = await vite.ssrLoadModule('/src/lib/market.ts');
 const MIN_COVER = 0.95;
+/** Fewer spreads than this in 30 days: report coverage, don't judge it. */
+const MIN_SPREADS = 30;
 
 const c = new DeriveClient({ network: 'mainnet' });
 await c.connect();
 const now = Date.now();
 let trades = [];
-for (const currency of ['ETH', 'BTC']) {
+const ASSETS = (process.env.ASSETS ?? 'ETH,BTC,SOL,HYPE,XRP,ZEC,XAUT,ADA,LIT,VVV,PUMP,CC').split(',');
+for (const currency of ASSETS) {
   for (let page = 1; page <= 10; page++) {
     const r = await c.send('public/get_trade_history', { currency, instrument_type: 'option', from_timestamp: now - 30 * 864e5, to_timestamp: now, page, page_size: 1000 });
     trades = trades.concat(r.trades);
@@ -49,7 +53,7 @@ console.log(`${trades.length} option trades in 30 days · ${spreads.length} two-
 const q = (a, p) => [...a].sort((x, y) => x - y)[Math.min(a.length - 1, Math.floor(p * a.length))];
 let failed = 0;
 let feeMisses = 0;
-for (const cur of ['ETH', 'BTC']) {
+for (const cur of ASSETS) {
   const rows = spreads
     .filter((g) => g[0].instrument_name.startsWith(cur))
     .map((g) => {
@@ -72,14 +76,17 @@ for (const cur of ['ETH', 'BTC']) {
         feeMisses++;
         if (process.env.DEBUG) console.log('   fee miss', g.map((t) => `${t.direction} ${t.trade_amount} ${t.instrument_name} @ ${t.trade_price} fee ${t.trade_fee} extra ${t.extra_fee} idx ${t.index_price}`).join(' + '), `→ charged ${fee.toFixed(4)}, estimate ${estimate.toFixed(4)}`);
       }
-      return { over, preview: rfqEdge(Math.abs(mark), S), width: Math.abs(N(g[0].instrument_name.split('-')[2]) - N(g[1].instrument_name.split('-')[2])) };
+      const sp = MARKETS[cur] ?? specFor(cur);
+      return { over, preview: rfqEdge(Math.abs(mark), S, sp.tick, sp.rfqK), width: Math.abs(N(g[0].instrument_name.split('-')[2].replace('_', '.')) - N(g[1].instrument_name.split('-')[2].replace('_', '.'))) };
     });
   if (!rows.length) continue;
   const cover = rows.filter((r) => r.preview >= r.over).length / rows.length;
   const extra = q(rows.map((r) => ((r.preview - r.over) / r.width) * 100), 0.5);
-  const ok = cover >= MIN_COVER;
+  // Too few trades to judge an asset: report it, don't fail on it.
+  const judged = rows.length >= MIN_SPREADS;
+  const ok = !judged || cover >= MIN_COVER;
   if (!ok) failed++;
-  console.log(`${ok ? 'ok  ' : 'FAIL'} ${cur}: preview at least what was paid in ${(cover * 100).toFixed(1)}% of ${rows.length} spreads (need ${MIN_COVER * 100}%) · typically ${extra.toFixed(1)}¢ a share above it`);
+  console.log(`${ok ? (judged ? 'ok  ' : 'info') : 'FAIL'} ${cur}: preview at least what was paid in ${(cover * 100).toFixed(1)}% of ${rows.length} spreads${judged ? ` (need ${MIN_COVER * 100}%)` : ` (too few to judge)`} · typically ${extra.toFixed(1)}¢ a share above it`);
 }
 console.log(`${feeMisses ? 'FAIL' : 'ok  '} fee estimate never below the fee Derive charged${feeMisses ? ` (below it on ${feeMisses} spreads)` : ''}`);
 if (feeMisses) failed++;

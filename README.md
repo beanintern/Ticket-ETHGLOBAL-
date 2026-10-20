@@ -35,6 +35,25 @@ changing them.
 
 To test the production build locally: `npm run build && npm start` (http://localhost:3000).
 
+### Markets
+
+Every asset with options trading on Derive is listed: ETH, BTC, SOL, HYPE, XRP, ZEC, XAUT, ADA,
+LIT, VVV, PUMP and CC as of October 2026. The list comes from Derive (`public/get_all_currencies`,
+keeping the currencies with active options), so a new listing appears without a code change.
+Pick one from the dropdown in the header (`src/components/AssetPicker.tsx`): each row has the
+token's logo, ticker, name, price and 24-hour change, and typing searches tickers and names
+(arrow keys and Enter work; the last market is remembered). An asset's options load the first
+time it's picked, and only markets in use keep refreshing, so twelve markets cost little more
+than one. Token logos are bundled in `src/assets/tokens/` (from CoinGecko; an asset without one
+gets a lettered badge).
+
+Assets differ in more than price. Each one's tick and contract sizes come from its Derive
+listings (`Market.rules`): ETH options trade in 0.01-contract steps from 0.1, PUMP's in steps of
+1,000 from 50,000. New legs default to one lot (the larger of one contract and the minimum),
+quantity buttons step by it, Easy bets are sized on that grid, and strikes and prices show the
+decimals they need (63,000 · 2,525 · 1.7 · 0.0045). Derive writes decimal strikes with an
+underscore in instrument names (`ADA-20261225-1_7-P`), which the app follows both ways.
+
 ### Market data: Live, Testnet, Demo
 
 Switch with the **Live / Testnet / Demo** control in the header, or `?source=live|testnet|mock`
@@ -91,12 +110,15 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
   a bet under the minimum can't be placed, that a paper bet fills at the preview's leg prices and
   costs at most $X with RFQ fees on a Derive-sized order, that shares pay exactly $1 / $0 / 50¢,
   and that bets list and sell.
-- `check:live` loads real Derive data with the app's own code and checks expiries, strikes,
-  the index and history, that our pricing reproduces Derive's mark prices (within 0.5%), and
-  that IV for unlisted strikes is interpolated sensibly.
-- `check:rfq` takes Derive mainnet's last 30 days of two-leg vertical spreads traded by RFQ and
-  checks the app's preview (`rfqEdge`) was at least what the taker paid over mark in 95%+ of them,
-  for ETH and BTC, and that the RFQ fee estimate is never below the fee Derive charged.
+- `check:live` loads real Derive data for every listed asset (or `ASSETS=SOL,PUMP`) with the
+  app's own code and checks expiries, strikes, contract rules, the index and history, that our
+  pricing reproduces Derive's mark prices (within 0.5%, or half a tick for tiny-priced tokens),
+  that IV for unlisted strikes is interpolated sensibly, and that Derive recognises the
+  instrument names the app builds (decimal strikes included).
+- `check:rfq` takes Derive mainnet's last 30 days of two-leg vertical spreads traded by RFQ, for
+  every asset, and checks the app's preview (`rfqEdge` with the asset's own multiplier) was at
+  least what the taker paid over mark in 95%+ of them (for assets with 30+ such trades; thinner
+  ones are reported), and that the RFQ fee estimate is never below the fee Derive charged.
 - `check:deposit` runs the app's deposit code with a wallet that records transactions instead of
   sending them, then replays each deposit with `eth_call` against Derive's real contracts (USDC
   balance and allowance set by state override). It must succeed, revert without the approval,
@@ -135,11 +157,15 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
   **Bets trade by RFQ**, so every listed band can be bet on, book or no book: market makers quote
   the whole spread as one package, which fills whole or not at all. Before anyone asks there's no
   firm price, so each box shows a **preview**: the fair price plus a markup set on the expensive
-  side of where makers quote, max($0.10, 1.5% × √(spread's fair price × index)) per contract.
-  Against Derive mainnet's two-leg vertical spreads taken by RFQ over 30 days (634 trades), the
-  preview was at least what the taker paid in about 98% of them, typically 1–2¢ a share above it
-  (`npm run check:rfq` re-runs this). The firm quote is usually better than what you saw, rarely
-  worse. Boxes are blank only under 0.2¢ fair (nothing to price) or over 99¢ preview (nothing to
+  side of where makers quote, max(one tick, k × √(spread's fair price × index)) per contract,
+  where k is the asset's own multiplier (`MarketSpec.rfqK`): makers quote SOL or LIT spreads far
+  wider than ETH's. Each k is the smallest that was at least what takers actually paid over mark
+  in 97% of that asset's two-leg vertical spreads taken by RFQ on Derive mainnet over 30 days
+  (1.5% for ETH and BTC, 4–5% for HYPE, XAUT and SOL, 8% for XRP and ZEC, 15–19% for PUMP and
+  LIT; ADA, VVV and CC had too few trades and use a cautious 15%). On ETH that's typically 1–2¢ a
+  share above what was paid; on thinly quoted assets the preview sits well above fair, as their
+  quotes do. `npm run check:rfq` re-checks it against fresh trades. The firm quote is usually
+  better than what you saw, rarely worse. Boxes are blank only under 0.2¢ fair (nothing to price) or over 99¢ preview (nothing to
   win). Bets start at $10, or more where Derive's smallest order (0.1 contracts) costs more. A
   stake is sized at the preview with fees included: contracts rounded down to Derive's 0.01 step;
   RFQ fees estimated high (Derive charges one $0.50 base fee plus, per contract, min(0.03% of the
@@ -206,13 +232,13 @@ connected subaccount. It's two transactions the wallet signs and pays gas for, o
 (mainnet) or Sepolia (testnet), through the SDK's contract-call deposit:
 
 1. `approve` Derive's ActionManager to pull the USDC (skipped if already allowed);
-2. `depositToNewSubaccount` (first deposit: creates the account under the margin manager for
-   ETH and BTC options) or `deposit` (into the connected subaccount).
+2. `depositToNewSubaccount` (first deposit: creates the account; later, a subaccount in another
+   margin group) or `deposit` (into the connected subaccount).
 
 Which token, protocol asset, manager and minimum to use come from Derive's
 `public/get_risk_universes` at the time, not constants: today USDC
-(`0xA0b8…eB48` on Ethereum), manager 1 (standard margin, ETH/BTC options and perps), $5
-minimum. The form shows the wallet's USDC and ETH (for gas), refuses less than the minimum or
+(`0xA0b8…eB48` on Ethereum), the standard-margin manager of the asset's group (1 for ETH and
+BTC), $5 minimum. The form shows the wallet's USDC and ETH (for gas), refuses less than the minimum or
 more than the balance, checks a connected account's deposit comes from its owner wallet, links
 the transaction, and polls `public/get_pending_deposits` until Derive credits it. Test USDC for
 the testnet still comes from Derive's faucet at
@@ -220,6 +246,14 @@ the testnet still comes from Derive's faucet at
 
 **Use an existing session key instead**: paste the wallet address and a session key you
 registered elsewhere. The app refuses the wallet's own key.
+
+**Margin groups.** Derive splits its options into margin groups (risk universes): PRIME (ETH,
+BTC), MIDCAP (HYPE), ALT (SOL, XRP, ZEC, ADA, LIT, VVV, PUMP, CC) and RWA (XAUT). A subaccount
+belongs to one group and trades only that group's assets. The app reads each subaccount's group
+and, when you pick an asset, switches to a subaccount in its group. If you have none, real orders
+for that asset are off (paper still works). The ticket and bet card say why, and the account
+panel offers a deposit that creates a subaccount in the right group, picked up automatically once
+Derive credits it. Subaccounts are labelled with their group (`#12 · ALT`).
 
 Once connected, the panel shows the subaccount, value, margin, collateral and whether the key can
 trade. The Positions tab lists the subaccount's option positions (drawn on the chart like paper

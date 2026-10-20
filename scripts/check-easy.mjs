@@ -55,7 +55,7 @@ const PRICER = `(() => {
     const [t, kb, ks] = b.dir === 'above' ? ['C', b.lo, b.hi] : ['P', b.hi, b.lo];
     const pb = bs(t, spot, kb, T, ivOf(kb, T)), ps = bs(t, spot, ks, T, ivOf(ks, T));
     // The RFQ markup on the whole spread, split half to each leg (the sold leg can't go below 0).
-    const e = Math.max(0.1, 0.015 * Math.sqrt(Math.max(pb - ps, 0) * spot));
+    const e = Math.max(window.__ticket.rules(asset).tick, window.__ticket.specs[asset].rfqK * Math.sqrt(Math.max(pb - ps, 0) * spot));
     const sellAt = Math.max(0, ps - e / 2), buyAt = pb + e - (ps - sellAt);
     const clamp = (v) => Math.min(1, Math.max(0, v));
     return { fair: clamp((pb - ps) / w), preview: clamp((buyAt - sellAt) / w), legs: [buyAt, sellAt] };
@@ -70,12 +70,20 @@ const cases = [
   ['ETH', 7, 1, 0.4, 100],
   ['BTC', 21, 0.6, 0.25, 25],
   ['BTC', 182, 0.7, 0.15, 40],
+  // Other Derive assets: different contract sizes and price scales.
+  ['SOL', 21, 0.5, 0.3, 30],
+  ['ADA', 60, 0.6, 0.2, 25],
+  ['PUMP', 60, 0.6, 0.25, 40],
 ];
 let failed = 0;
 for (const [asset, horizon, colFrac, chance, stake] of cases) {
   const failures = [];
   const fail = (m) => failures.push(m);
-  await page.click(`.market:has-text("${asset}")`);
+  // Pick the market with the header's search, as a user would.
+  await page.click('.asset-trigger');
+  await page.fill('.asset-search input', asset.toLowerCase());
+  await page.keyboard.press('Enter');
+  await page.waitForFunction((a) => window.__chart?.asset === a, asset);
   await page.evaluate((h) => window.__ticket.setView({ horizon: h * 864e5, yZoom: 1, yShift: 0 }), horizon);
   await page.waitForTimeout(300);
   await page.mouse.move(1430, 850);
@@ -163,7 +171,9 @@ for (const [asset, horizon, colFrac, chance, stake] of cases) {
     const wantRows = dir === 'above' ? [['Buy', pick.lo], ['Sell', pick.hi]] : [['Buy', pick.hi], ['Sell', pick.lo]];
     if (rows.length !== 2) fail(`underlying shows ${rows.length} rows`);
     else wantRows.forEach(([side, k], i) => {
-      if (!rows[i].startsWith(side) || !rows[i].includes(`${asset}-${ymd}-${k}-${t}`)) fail(`underlying row ${i + 1} "${rows[i]}", expected ${side} ${asset}-${ymd}-${k}-${t}`);
+      // Derive writes decimal strikes with an underscore: 0.24 → 0_24.
+      const name = `${asset}-${ymd}-${String(k).replace('.', '_')}-${t}`;
+      if (!rows[i].startsWith(side) || !rows[i].includes(name)) fail(`underlying row ${i + 1} "${rows[i]}", expected ${side} ${name}`);
     });
     const before = await page.$$eval('.bet-list li', (l) => l.length);
     await page.click('.bet-card .primary');
@@ -179,7 +189,10 @@ for (const [asset, horizon, colFrac, chance, stake] of cases) {
     if (Math.abs(payAt(lose)) > 1e-9) fail(`pays ${payAt(lose)} per share when wrong, not $0`);
     if (Math.abs(payAt((b.lo + b.hi) / 2) - 0.5) > 1e-9) fail(`pays ${payAt((b.lo + b.hi) / 2)} in the middle, not 50¢`);
     const qty = pos.legs[0].qty;
-    if (Math.abs(qty * 100 - Math.round(qty * 100)) > 1e-6 || qty < 0.1) fail(`${qty} contracts isn't a size Derive accepts`);
+    // On the asset's own grid: e.g. 0.01 steps from 0.1 for ETH, 1,000 steps from 50,000 for PUMP.
+    const rules = await page.evaluate((a) => window.__ticket.rules(a), asset);
+    const steps = qty / rules.amountStep;
+    if (Math.abs(steps - Math.round(steps)) > 1e-6 || qty < rules.minAmount - 1e-9) fail(`${qty} contracts isn't a size Derive accepts (min ${rules.minAmount}, step ${rules.amountStep})`);
     // Paper fills at the preview's leg prices (bought leg marked up, sold leg down).
     const spot = await page.evaluate(() => window.__chart.spot);
     const ref = await page.evaluate(({ asset, PRICER, b }) => (0, eval)(PRICER)(asset, window.__chart.spot, window.__chart.now, b), { asset, PRICER, b: pick });
@@ -190,7 +203,7 @@ for (const [asset, horizon, colFrac, chance, stake] of cases) {
     const premium = pos.legs.reduce((a, l) => a + l.side * l.qty * l.entry, 0);
     const fees = 0.5 + pos.legs.reduce((a, l) => a + Math.min(0.0003 * spot, 0.125 * l.entry) * l.qty, 0);
     const paid = premium + fees;
-    const step = ((premium + fees - 0.5) / qty) * 0.01;
+    const step = ((premium + fees - 0.5) / qty) * rules.amountStep;
     if (paid > bet + 1e-6 || paid < bet - step - 0.01) fail(`bet costs $${paid.toFixed(2)} (incl. $${fees.toFixed(2)} fees) for a $${bet} stake`);
     if (Math.abs(b.entry * b.shares - paid) > 1e-6) fail(`recorded $${(b.entry * b.shares).toFixed(2)} in, cost $${paid.toFixed(2)}`);
     // 4. Listed, then sold.

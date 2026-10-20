@@ -17,8 +17,8 @@ const net = process.env.NETWORK === 'testnet' ? 'testnet' : 'mainnet';
 let failed = 0;
 const rpc = net === 'mainnet' ? 'https://ethereum-rpc.publicnode.com' : 'https://ethereum-sepolia-rpc.publicnode.com';
 const provider = new JsonRpcProvider(rpc);
-const target = await depositTarget(net);
-console.log(net, 'target', target);
+const ethTarget = await depositTarget(net);
+console.log(net, 'target', ethTarget);
 const ab = AbiCoder.defaultAbiCoder();
 const slot = (k, s) => keccak256(ab.encode(['address', 'uint256'], [k, BigInt(s)]));
 
@@ -37,7 +37,9 @@ class Recorder extends AbstractSigner {
   }
 }
 const am = new Interface(['function deposit(address,uint256,uint64,address)', 'function depositToNewSubaccount(address,uint256,uint32,address)', 'function approve(address,uint256)']);
-for (const [label, sub] of [['new account', null], ['existing subaccount', 1]]) {
+const solTarget = await depositTarget(net, 'SOL');
+console.log(net, 'SOL target (ALT group)', solTarget);
+for (const [label, sub, target] of [['new account', null, ethTarget], ['existing subaccount', 1, ethTarget], ['new SOL subaccount (ALT group)', null, solTarget]]) {
   const me = Wallet.createRandom().address;
   const r = new Recorder(me, provider);
   const amount = 25;

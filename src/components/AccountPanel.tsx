@@ -28,6 +28,11 @@ export function AccountButton({ info, account, onOpen }: { info: NetInfo; accoun
 
 interface Props {
   info: NetInfo;
+  /** The asset on screen, and its margin group's name when the account has no subaccount in it. */
+  asset: string;
+  missingGroup: string | null;
+  /** Margin group names by id, to label subaccounts. */
+  groupNames: Record<number, string>;
   account: AccountState | null;
   initial: { creds: Credentials; remember: boolean } | null;
   onConnect: (creds: Credentials, remember: boolean) => Promise<void>;
@@ -39,7 +44,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function AccountPanel({ info, account, initial, onConnect, onMetaMask, metaMaskAvailable, onDisconnect, onSelectSubaccount, onClose }: Props) {
+export function AccountPanel({ info, asset, missingGroup, groupNames, account, initial, onConnect, onMetaMask, metaMaskAvailable, onDisconnect, onSelectSubaccount, onClose }: Props) {
   const [manual, setManual] = useState(false);
   const [step, setStep] = useState<string | null>(null);
   const [owner, setOwner] = useState(initial?.creds.owner ?? '');
@@ -163,7 +168,7 @@ export function AccountPanel({ info, account, initial, onConnect, onMetaMask, me
             </p>
           </form>
         ) : (
-          <AccountDetails info={info} account={account} blocked={blocked} onDisconnect={onDisconnect} onSelectSubaccount={onSelectSubaccount} />
+          <AccountDetails info={info} asset={asset} missingGroup={missingGroup} groupNames={groupNames} account={account} blocked={blocked} onDisconnect={onDisconnect} onSelectSubaccount={onSelectSubaccount} />
         )}
       </div>
     </div>
@@ -186,12 +191,18 @@ function FundingHint({ info }: { info: NetInfo }) {
 
 function AccountDetails({
   info,
+  asset,
+  missingGroup,
+  groupNames,
   account,
   blocked,
   onDisconnect,
   onSelectSubaccount,
 }: {
   info: NetInfo;
+  asset: string;
+  missingGroup: string | null;
+  groupNames: Record<number, string>;
   account: AccountState;
   blocked: boolean;
   onDisconnect: () => void;
@@ -237,11 +248,15 @@ function AccountDetails({
                 {account.subaccountIds.map((id) => (
                   <option key={id} value={id}>
                     #{id}
+                    {groupNames[account.groups[id]] ? ` · ${groupNames[account.groups[id]]}` : ''}
                   </option>
                 ))}
               </select>
             ) : account.subaccountId !== null ? (
-              <span className="num">#{account.subaccountId}</span>
+              <span className="num">
+                #{account.subaccountId}
+                {groupNames[account.groups[account.subaccountId]] ? ` · ${groupNames[account.groups[account.subaccountId]]}` : ''}
+              </span>
             ) : (
               <span className="muted">None yet</span>
             )}
@@ -293,6 +308,15 @@ function AccountDetails({
           </div>
           {account.error && <p className="form-error">{account.error}</p>}
         </>
+      )}
+      {missingGroup && (
+        <div className="deposit-box group-setup">
+          <p>
+            <b>{asset} options</b> trade in Derive's {missingGroup} margin group, and none of your subaccounts is in it (each group's subaccounts trade only
+            its own assets). A deposit creates a {missingGroup} subaccount owned by your wallet; it's picked automatically for {asset} once Derive credits it.
+          </p>
+          {!blocked && <DepositForm info={info} subaccountId={null} asset={asset} owner={account.owner} />}
+        </div>
       )}
       <div className="deposit-box">
         <button className="ghost" onClick={() => setDepositing((v) => !v)} disabled={blocked} aria-expanded={depositing}>

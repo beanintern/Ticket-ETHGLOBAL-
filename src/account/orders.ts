@@ -2,6 +2,7 @@
 // builder fee attached to every order.
 import type { Market } from '../data/types';
 import type { Leg } from '../lib/strategy';
+import { strikeCode } from '../lib/market';
 
 /**
  * Builder code and fee, set at build time. With a code set, every order carries
@@ -46,7 +47,8 @@ export interface LegOrder {
 
 const ymd = (ts: number) => new Date(ts).toISOString().slice(0, 10).replace(/-/g, '');
 
-export const instrumentName = (leg: Pick<Leg, 'asset' | 'expiry' | 'strike' | 'type'>) => `${leg.asset}-${ymd(leg.expiry)}-${leg.strike}-${leg.type}`;
+/** Derive's name for an option: ETH-20261030-3000-C, ADA-20261225-1_7-P (decimal strikes use "_"). */
+export const instrumentName = (leg: Pick<Leg, 'asset' | 'expiry' | 'strike' | 'type'>) => `${leg.asset}-${ymd(leg.expiry)}-${strikeCode(leg.strike)}-${leg.type}`;
 
 const decimals = (step: number) => {
   const s = String(step);

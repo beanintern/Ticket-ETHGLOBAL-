@@ -16,9 +16,12 @@ export function DepositForm({
   info,
   subaccountId,
   owner,
+  asset = 'ETH',
   onCredited,
 }: {
   info: NetInfo;
+  /** For a new subaccount: the asset it's for, which decides its margin group. */
+  asset?: string;
   subaccountId: number | null;
   /** The account's owner, when connected: the wallet must be the same one. */
   owner?: string;
@@ -38,13 +41,13 @@ export function DepositForm({
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
-    depositTarget(info.net)
+    depositTarget(info.net, asset)
       .then((t) => alive.current && setTarget(t))
       .catch((e) => alive.current && setError(`Couldn’t load Derive’s deposit details: ${(e as Error).message}`));
     return () => {
       alive.current = false;
     };
-  }, [info.net]);
+  }, [info.net, asset]);
 
   const connectWallet = async () => {
     if (!target) return;
