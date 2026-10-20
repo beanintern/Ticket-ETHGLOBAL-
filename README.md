@@ -64,6 +64,8 @@ N=200 SEED=7 npm run check:chart
 SEED=7 ONLY=113 npm run check:chart   # replay one case
 npm run check:live    # the live Derive layer against the real exchange
 NETWORK=testnet npm run check:live
+npm run check:deposit # the in-app deposit against Derive's real contracts (nothing is sent)
+NETWORK=testnet npm run check:deposit
 npm run check:draw    # draws paths with the mouse and checks the position built from each
 npm run check:easy    # Easy mode grid: boxes, share prices vs independent pricing, sizes, fees, $1 payout
 ```
@@ -90,6 +92,10 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
 - `check:live` loads real Derive data with the app's own code and checks expiries, strikes,
   the index and history, that our pricing reproduces Derive's mark prices (within 0.5%), and
   that IV for unlisted strikes is interpolated sensibly.
+- `check:deposit` runs the app's deposit code with a wallet that records transactions instead of
+  sending them, then replays each deposit with `eth_call` against Derive's real contracts (USDC
+  balance and allowance set by state override). It must succeed, revert without the approval,
+  and refuse less than Derive's minimum.
 
 ## How it works
 
@@ -182,8 +188,26 @@ its own saved keys (`src/account/network.ts` holds what differs between them).
 From then on the session key signs logins and orders without popups. It's saved in this browser
 per wallet and reused on the next connect until it's within an hour of expiry. **Disconnect**
 forgets it. The wallet's own key never leaves MetaMask. A wallet needs a Derive account on that
-network first: on mainnet, deposit USDC at [app.derive.xyz](https://app.derive.xyz); on the
-testnet, get Sepolia ETH from a faucet, then **Mint** test USDC and deposit at
+network first, which a deposit creates (below).
+
+### Deposits (`src/account/deposit.ts`, `src/components/DepositForm.tsx`)
+
+USDC goes from the wallet into Derive without leaving the app: **New to Derive? Deposit USDC**
+in the connect panel creates the account, and **Deposit USDC** in the account panel tops up the
+connected subaccount. It's two transactions the wallet signs and pays gas for, on Ethereum
+(mainnet) or Sepolia (testnet), through the SDK's contract-call deposit:
+
+1. `approve` Derive's ActionManager to pull the USDC (skipped if already allowed);
+2. `depositToNewSubaccount` (first deposit: creates the account under the margin manager for
+   ETH and BTC options) or `deposit` (into the connected subaccount).
+
+Which token, protocol asset, manager and minimum to use come from Derive's
+`public/get_risk_universes` at the time, not constants: today USDC
+(`0xA0b8…eB48` on Ethereum), manager 1 (standard margin, ETH/BTC options and perps), $5
+minimum. The form shows the wallet's USDC and ETH (for gas), refuses less than the minimum or
+more than the balance, checks a connected account's deposit comes from its owner wallet, links
+the transaction, and polls `public/get_pending_deposits` until Derive credits it. Test USDC for
+the testnet still comes from Derive's faucet at
 [testnet.app.derive.xyz/developers](https://testnet.app.derive.xyz/developers).
 
 **Use an existing session key instead**: paste the wallet address and a session key you
@@ -212,14 +236,47 @@ each leg.
 Set these as build variables, locally in `.env.local` or as Railway service variables:
 
 ```sh
-VITE_DERIVE_REFERRAL_CODE=your-code   # your builder / referral code
-VITE_DERIVE_EXTRA_FEE=0.1             # optional builder fee, USDC per contract
+VITE_DERIVE_REFERRAL_CODE=your-code   # your builder / referral code (case sensitive)
+VITE_DERIVE_EXTRA_FEE=0.1             # optional builder fee, USDC per order (0.000001–1000)
 ```
 
 With a code set, every order carries `referral_code` and `extra_fee`, the review panel shows the
 builder part of the fees, and Derive credits the fees to that code. Without one, orders go out
-with no builder fee. The code has to be registered on the network you trade on (mainnet and
-testnet are separate).
+with no builder fee. `extra_fee` is a total for the order, not per contract: Derive's max-fee rule
+divides it by the order's amount. Builder fees need the code registered in Derive's
+[API Broker program](https://docs.derive.xyz/integrators/programs/api-broker-program), applied
+for within two weeks of the first referred trade; fees are paid to the registered Derive wallet
+every four weeks.
+
+### Fee cap on each order
+
+Each order is signed with a `max_fee` per contract (`maxFee` in `src/account/orders.ts`) from
+Derive's rule: `2 × taker rate × max(index, limit)`, with 1.5× headroom, plus the base fee and any
+builder fee spread over the smallest fill Derive allows (0.1 contracts). The SDK's default
+(3 × (taker rate × index + base fee)) is below what Derive requires for small orders, which it
+would reject as `signed_max_fee_too_low`. The cap is a ceiling; what's charged is Derive's fee
+schedule.
+
+## Derive's terms and requirements
+
+What this app does about them, as of October 2026:
+
+- **Who may use Derive.** Derive's [Terms of Use](https://www.derive.xyz/terms-of-use) (updated
+  23 Sep 2026) exclude US, Canadian, Australian and Panamanian residents and citizens (tax
+  residents too), people in sanctioned or listed countries, under-18s, and anyone using a VPN or
+  proxy to get around this; in the UK only investment professionals and high-net-worth
+  investors. On mainnet the account panel asks the user to confirm this and agree to the Terms
+  before connecting or depositing (`src/components/Eligibility.tsx`, remembered per browser until
+  the Terms change). It's a self-declaration: the app doesn't geo-block by IP itself.
+- **Market data.** Derive's [Data Usage Policy](https://www.derive.xyz/data-usage-policy) (30 Jun
+  2026) limits Derive data to personal or internal use; showing it in a commercial trading app
+  for others needs Lyra Technologies' prior written consent or a separate agreement. **Get this
+  from Derive (e.g. alongside the API Broker application) before running this publicly.** The app
+  credits Derive as the source of its market data.
+- **Name and marks.** "Derive" is used only to say where orders and data go; no Derive logos.
+  Using Derive's marks otherwise needs their consent.
+- **Builder fees.** See above: register the code with the API Broker program within two weeks of
+  the first referred trade.
 
 ## Next
 

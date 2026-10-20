@@ -426,3 +426,17 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .bet-card .primary.is-confirm { background: #f0b950; color: #14110a; }
 .link.is-confirm { color: #f0b950; font-weight: 600; }
 .venue-tag.is-real { background: rgba(240, 185, 80, 0.16); color: #f0b950; }
+
+/* Deposits and eligibility (account panel) */
+.deposit-box { display: grid; gap: 10px; }
+.deposit { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--bg); }
+.deposit p { margin: 0; }
+.deposit a { color: var(--long); }
+.deposit-amount { display: grid; gap: 4px; }
+.deposit-amount > span { font-size: 12px; color: var(--muted); }
+.deposit-amount .stake-input .link { margin-left: auto; font-size: 12px; }
+.eligibility { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border: 1px solid rgba(240, 185, 80, 0.35); border-radius: 8px; background: rgba(240, 185, 80, 0.06); }
+.eligibility span { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.eligibility a { color: var(--long); }
+.data-credit { color: var(--dim); font-size: 11px; white-space: nowrap; }
+.data-credit a { color: inherit; }

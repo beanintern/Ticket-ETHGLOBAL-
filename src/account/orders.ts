@@ -5,8 +5,9 @@ import type { Leg } from '../lib/strategy';
 
 /**
  * Builder code and fee, set at build time. With a code set, every order carries
- * `referral_code` and `extra_fee` (USDC per contract, paid on fills), so fees are
- * credited to the builder. Unset: orders go out without a builder fee.
+ * `referral_code` and `extra_fee` (USDC for the whole order, on top of Derive's fees: Derive's
+ * max-fee rule divides it by the order's amount), credited to the builder. Unset: orders go out
+ * without a builder fee.
  */
 export const BUILDER = {
   code: (import.meta.env.VITE_DERIVE_REFERRAL_CODE as string | undefined)?.trim() || null,
@@ -23,6 +24,10 @@ export interface Instrument {
   tick: number;
   amountStep: number;
   minAmount: number;
+  /** Taker fee as a fraction of the index, per contract. */
+  takerRate: number;
+  /** Fixed fee per taker order, USDC. */
+  baseFee: number;
 }
 
 export interface LegOrder {
@@ -33,6 +38,8 @@ export interface LegOrder {
   amount: string;
   /** Limit price, as a decimal string on the tick grid. */
   limitPrice: string;
+  /** Most fee per contract the order is signed to accept, USDC (see maxFee). */
+  maxFee: string;
   mark: number;
   reduceOnly: boolean;
 }
@@ -77,6 +84,28 @@ export function legOrders(legs: Leg[], market: Market, instruments: Map<string, 
     if (!(Number(price) > 0)) throw new Error(`No price for ${name}`);
     const amount = onGrid(leg.qty, spec.amountStep, 'down');
     if (Number(amount) < spec.minAmount) throw new Error(`${name}: minimum size is ${spec.minAmount}`);
-    return { legId: leg.id, instrument: name, direction: buy ? 'buy' : 'sell', amount, limitPrice: price, mark, reduceOnly: close };
+    return {
+      legId: leg.id,
+      instrument: name,
+      direction: buy ? 'buy' : 'sell',
+      amount,
+      limitPrice: price,
+      maxFee: maxFee(spec, market.spot, Number(price)),
+      mark,
+      reduceOnly: close,
+    };
   });
+}
+
+/**
+ * The per-contract fee cap signed into an order. Derive rejects an order whose cap is below
+ * `2 × taker rate × max(index, limit) + extra_fee / amount` (resting), plus `base_fee / fill amount`
+ * when it takes liquidity. The fixed parts are spread over the smallest fill Derive allows, so a
+ * partial fill still fits, and the proportional part gets 1.5× headroom for the index moving
+ * between signing and matching. It's a ceiling: what's charged is Derive's fee schedule.
+ */
+export function maxFee(spec: Instrument, index: number, limitPrice: number): string {
+  const proportional = 2 * spec.takerRate * Math.max(index, limitPrice) * 1.5;
+  const fixed = (spec.baseFee + (BUILDER.code ? BUILDER.extraFee : 0)) / spec.minAmount;
+  return (proportional + fixed).toFixed(6);
 }

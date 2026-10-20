@@ -71,8 +71,11 @@ export const forgetSessionKey = (net: DeriveNet, owner: string) => saveKey(net, 
 
 export const hasMetaMask = () => typeof window !== 'undefined' && !!(window as unknown as { ethereum?: Eip1193 }).ethereum;
 
-/** Asks MetaMask for the account and puts it on the network's chain (Ethereum or Sepolia), which EIP-712 signing checks. */
-export async function metaMaskSigner(net: DeriveNet): Promise<OwnerSigner> {
+/**
+ * Asks MetaMask for the account and puts it on the network's chain (Ethereum or Sepolia): EIP-712
+ * signing checks the chain, and deposits are transactions on it.
+ */
+export async function metaMaskEthers(net: DeriveNet): Promise<import('ethers').JsonRpcSigner> {
   const chain = NETS[net].chain;
   const eth = (window as unknown as { ethereum?: Eip1193 }).ethereum;
   if (!eth) throw new Error('MetaMask isn’t installed in this browser. Install it from metamask.io, or connect with a session key instead.');
@@ -102,7 +105,13 @@ export async function metaMaskSigner(net: DeriveNet): Promise<OwnerSigner> {
         .catch(rethrowWallet);
     }
   }
-  const signer = await new BrowserProvider(eth as never).getSigner(accounts[0]);
+  // A fresh provider after any chain switch, so it's bound to the right network.
+  return new BrowserProvider(eth as never).getSigner(accounts[0]);
+}
+
+/** The MetaMask account as an owner signer for Derive's login and session-key messages. */
+export async function metaMaskSigner(net: DeriveNet): Promise<OwnerSigner> {
+  const signer = await metaMaskEthers(net);
   return {
     address: await signer.getAddress(),
     signMessage: (m) => signer.signMessage(m).catch(rethrowWallet),

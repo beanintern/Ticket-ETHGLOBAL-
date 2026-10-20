@@ -50,7 +50,6 @@ export function DeriveReview({ legs, trading, onBack, onPaper, onDone }: { legs:
       }, 0)
     : 0;
   const fees = prep ? prep.previews.reduce((a, p) => a + p.fee, 0) : 0;
-  const contracts = prep ? prep.orders.reduce((a, o) => a + Number(o.amount), 0) : 0;
   const blocked = trading.canTrade === false ? 'This session key is read-only: give it a trade scope (trade:orderbook) on Derive to place orders.' : null;
 
   const send = async () => {
@@ -113,7 +112,7 @@ export function DeriveReview({ legs, trading, onBack, onPaper, onDone }: { legs:
             <b className="num">{usd(Math.abs(cost))}</b>
           </div>
           <div className="review-total sub">
-            <span>Fees{BUILDER.code && BUILDER.extraFee ? `, incl. builder ${usd(BUILDER.extraFee * contracts)}` : ''}</span>
+            <span>Fees{BUILDER.code && BUILDER.extraFee ? `, incl. builder ${usd(BUILDER.extraFee * prep.orders.length)}` : ''}</span>
             <span className="num">{usd(fees)}</span>
           </div>
         </>

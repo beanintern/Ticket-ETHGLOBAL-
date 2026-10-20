@@ -310,7 +310,7 @@ export class DeriveAccount {
     if (!this.closed) this.emit();
   }
 
-  /** Tick size and amount grid per instrument (fixed for an instrument's life, so cached). */
+  /** Tick size, amount grid and fees per instrument (fixed for an instrument's life, so cached). */
   async instruments(names: string[]): Promise<Map<string, Instrument>> {
     const out = new Map<string, Instrument>();
     await Promise.all(
@@ -321,6 +321,8 @@ export class DeriveAccount {
             tick: num(i.tick_size),
             amountStep: num(i.amount_step),
             minAmount: num(i.minimum_amount),
+            takerRate: num(i.taker_fee_rate),
+            baseFee: num(i.base_fee),
           }));
           p.catch(() => this.instrumentCache.delete(name));
           this.instrumentCache.set(name, p);
@@ -343,6 +345,7 @@ export class DeriveAccount {
       direction: o.direction,
       amount: o.amount,
       limitPrice: o.limitPrice,
+      maxFee: o.maxFee,
       orderType: 'limit' as const,
       timeInForce: mode === 'market' ? ('ioc' as const) : ('gtc' as const),
       reduceOnly: o.reduceOnly || undefined,

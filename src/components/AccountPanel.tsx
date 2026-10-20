@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { AccountState, Credentials } from '../account/derive';
 import { signedUsd, usd } from '../lib/format';
 import type { NetInfo } from '../account/network';
+import { DepositForm } from './DepositForm';
+import { EligibilityCheck, useEligibility } from './Eligibility';
 
 const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
@@ -45,6 +47,10 @@ export function AccountPanel({ info, account, initial, onConnect, onMetaMask, me
   const [remember, setRemember] = useState(initial?.remember ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [depositing, setDepositing] = useState(false);
+  // Mainnet: Derive's Terms of Use restrict who may use it; confirm before connecting or depositing.
+  const [eligible, setEligible] = useEligibility();
+  const blocked = info.real && !eligible;
 
   const metaMask = async () => {
     setBusy(true);
@@ -90,9 +96,10 @@ export function AccountPanel({ info, account, initial, onConnect, onMetaMask, me
           </button>
         </div>
 
+        {info.real && <EligibilityCheck ok={eligible} onChange={setEligible} />}
         {!account && !manual ? (
           <div className="acct-form">
-            <button className="primary mm" onClick={metaMask} disabled={busy}>
+            <button className="primary mm" onClick={metaMask} disabled={busy || blocked}>
               <MetaMaskIcon />
               {busy ? (step ?? 'Connecting…') : metaMaskAvailable ? 'Connect MetaMask' : 'Connect MetaMask (not installed)'}
             </button>
@@ -108,9 +115,14 @@ export function AccountPanel({ info, account, initial, onConnect, onMetaMask, me
             {info.real && (
               <p className="real-note">This is your real Derive account: orders placed here trade real USDC. Signing in and authorising the key cost no gas.</p>
             )}
-            <p className="fine">
-              Your wallet’s key never leaves MetaMask. No Derive account yet? <FundingHint info={info} />
-            </p>
+            <p className="fine">Your wallet’s key never leaves MetaMask.</p>
+            <div className="deposit-box">
+              <button className="ghost" onClick={() => setDepositing((v) => !v)} disabled={blocked} aria-expanded={depositing}>
+                New to Derive? Deposit USDC to create an account
+              </button>
+              {depositing && !blocked && <DepositForm info={info} subaccountId={null} />}
+              {depositing && !blocked && <p className="fine">Once it’s credited, connect with MetaMask above.</p>}
+            </div>
             <button className="link" onClick={() => setManual(true)}>
               Use an existing session key instead
             </button>
@@ -140,7 +152,7 @@ export function AccountPanel({ info, account, initial, onConnect, onMetaMask, me
               <span>Remember on this device (otherwise it’s forgotten when this tab closes)</span>
             </label>
             {error && <p className="form-error">{error}</p>}
-            <button className="primary" disabled={busy}>
+            <button className="primary" disabled={busy || blocked}>
               {busy ? 'Connecting…' : 'Connect'}
             </button>
             <button type="button" className="link" onClick={() => setManual(false)}>
@@ -151,7 +163,7 @@ export function AccountPanel({ info, account, initial, onConnect, onMetaMask, me
             </p>
           </form>
         ) : (
-          <AccountDetails info={info} account={account} onDisconnect={onDisconnect} onSelectSubaccount={onSelectSubaccount} />
+          <AccountDetails info={info} account={account} blocked={blocked} onDisconnect={onDisconnect} onSelectSubaccount={onSelectSubaccount} />
         )}
       </div>
     </div>
@@ -172,7 +184,20 @@ function FundingHint({ info }: { info: NetInfo }) {
   );
 }
 
-function AccountDetails({ info, account, onDisconnect, onSelectSubaccount }: { info: NetInfo; account: AccountState; onDisconnect: () => void; onSelectSubaccount: (id: number) => void }) {
+function AccountDetails({
+  info,
+  account,
+  blocked,
+  onDisconnect,
+  onSelectSubaccount,
+}: {
+  info: NetInfo;
+  account: AccountState;
+  blocked: boolean;
+  onDisconnect: () => void;
+  onSelectSubaccount: (id: number) => void;
+}) {
+  const [depositing, setDepositing] = useState(false);
   const p = account.portfolio;
   const upnl = p ? p.positions.reduce((a, x) => a + x.unrealizedPnl, 0) + p.otherPositions.reduce((a, x) => a + x.unrealizedPnl, 0) : 0;
   return (
@@ -226,10 +251,7 @@ function AccountDetails({ info, account, onDisconnect, onSelectSubaccount }: { i
 
       {account.subaccountId === null ? (
         <div className="empty">
-          <p>
-            This wallet has no {info.name} subaccount yet. Deposit {info.real ? 'USDC' : 'test USDC'} at {info.app.replace(/^https:\/\//, '').replace(/\/developers$/, '')} to create one; it
-            appears here a minute or two later.
-          </p>
+          <p>This wallet has no {info.name} subaccount yet. Deposit {info.real ? 'USDC' : 'test USDC'} below to create one; it appears here once Derive credits it.</p>
         </div>
       ) : !p ? (
         <p className="fine">{account.error ?? 'Loading portfolio…'}</p>
@@ -272,6 +294,12 @@ function AccountDetails({ info, account, onDisconnect, onSelectSubaccount }: { i
           {account.error && <p className="form-error">{account.error}</p>}
         </>
       )}
+      <div className="deposit-box">
+        <button className="ghost" onClick={() => setDepositing((v) => !v)} disabled={blocked} aria-expanded={depositing}>
+          {depositing ? 'Hide deposit' : `Deposit USDC${account.subaccountId !== null ? ` to #${account.subaccountId}` : ''}`}
+        </button>
+        {depositing && !blocked && <DepositForm info={info} subaccountId={account.subaccountId} owner={account.owner} />}
+      </div>
       <button className="ghost" onClick={onDisconnect}>
         Disconnect and forget key
       </button>

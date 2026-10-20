@@ -975,6 +975,14 @@ export default function App() {
             </span>
               </>
             )}
+            {source.kind !== 'mock' && (
+              <span className="data-credit">
+                Market data:{' '}
+                <a href="https://www.derive.xyz" target="_blank" rel="noreferrer">
+                  Derive
+                </a>
+              </span>
+            )}
           </div>
         </section>
 
