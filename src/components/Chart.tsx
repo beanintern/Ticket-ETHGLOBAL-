@@ -1371,17 +1371,26 @@ export function Chart(props: Props) {
       if (!easyGridRef.current || easyGridRef.current.key !== key) {
         const boxes: EasyBox[] = [];
         let lastX = nowX;
+        // Every box that's even partly on screen is built, so none pop in while panning: the
+        // column running off the right edge, and the bands crossing the top and bottom edges.
         for (const e of [...expiries].sort((a, b) => a.ts - b.ts)) {
+          if (lastX >= plotR) break;
           const x = tToX(e.ts);
-          if (x <= nowX + 4 || x > plotR) continue;
+          if (x <= nowX + 4) continue;
           if (x - lastX < 34) continue;
           const ks = market.strikes(e.ts).filter((k) => k > 0);
+          // Start from the highest strike at or below the bottom edge, end at the first one at or above the top.
+          let start = 0;
+          ks.forEach((k, i) => {
+            if (pToY(k) >= plotB) start = i;
+          });
           const edges: number[] = [];
-          for (const k of ks) {
+          for (const k of ks.slice(start)) {
             const y = pToY(k);
-            if (y > plotB + 40) continue;
-            if (!edges.length || pToY(edges[edges.length - 1]) - y >= 22) edges.push(k);
-            if (y < plotT - 40) break;
+            if (!edges.length || pToY(edges[edges.length - 1]) - y >= 22) {
+              edges.push(k);
+              if (y <= plotT) break;
+            }
           }
           for (let i = 0; i + 1 < edges.length; i++) {
             const q = easy.quote(e.ts, edges[i], edges[i + 1]);
@@ -1427,10 +1436,15 @@ export function Chart(props: Props) {
         ctx.lineWidth = sel ? 1.5 : 1;
         ctx.stroke();
         ctx.lineWidth = 1;
-        if (y1 - y0 >= 12 && x1 - x0 >= 30) {
-          ctx.font = `${sel || hov ? 700 : 600} ${y1 - y0 >= 18 ? 10.5 : 9.5}px ${MONO}`;
+        // Label the part that's on screen, so a box cut by an edge still shows its price.
+        const vx0 = Math.max(x0, nowX);
+        const vx1 = Math.min(x1, plotR);
+        const vy0 = Math.max(y0, plotT);
+        const vy1 = Math.min(y1, plotB);
+        if (vy1 - vy0 >= 12 && vx1 - vx0 >= 30) {
+          ctx.font = `${sel || hov ? 700 : 600} ${vy1 - vy0 >= 18 ? 10.5 : 9.5}px ${MONO}`;
           ctx.fillStyle = sel ? '#0c0f14' : hov ? C.text : `rgba(${rgb},${0.45 + 0.55 * heat})`;
-          ctx.fillText(fmtCents(b.q.price), (x0 + x1) / 2, (y0 + y1) / 2 + 0.5);
+          ctx.fillText(fmtCents(b.q.price), (vx0 + vx1) / 2, (vy0 + vy1) / 2 + 0.5);
         }
       }
       // Placed bets: an outline on their box, with the price paid and now.
