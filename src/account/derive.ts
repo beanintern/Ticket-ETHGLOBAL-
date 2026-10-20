@@ -87,6 +87,44 @@ export interface OrderResult {
   error: string | null;
 }
 
+/** One leg of an RFQ, from the taker's side. */
+export interface RfqLegIn {
+  instrument: string;
+  /** Contracts, as a decimal string on the amount grid. */
+  amount: string;
+  direction: 'buy' | 'sell';
+}
+
+/** A maker's firm quote for a whole package, as the taker sees it. */
+export interface RfqQuote {
+  rfqId: string;
+  /** Buying or selling the package (the legs as given). */
+  direction: 'buy' | 'sell';
+  /** What the SDK needs to execute it. */
+  quote: { rfq_id: string; quote_id: string; direction: 'buy' | 'sell'; legs: { instrument_name: string; amount: string; direction: 'buy' | 'sell'; price: string }[] };
+  /** Premium for the whole package: positive is paid, negative received. USDC. */
+  premium: number;
+  /** Derive's fee estimate for executing it. USDC. */
+  fee: number;
+  /** Fee cap to sign the execution with (Derive's suggestion). */
+  maxFee: string;
+  /** Each leg's quoted price per contract. */
+  prices: Record<string, number>;
+}
+
+export interface RfqFill {
+  ok: boolean;
+  /** Fraction of the package filled, 0–1. */
+  filled: number;
+  fee: number;
+  error: string | null;
+}
+
+/** How long to collect maker quotes for: the first one, then a little longer for a better one. */
+const RFQ_WAIT_MS = 7000;
+const RFQ_SETTLE_MS = 1500;
+const RFQ_POLL_MS = 500;
+
 const REFRESH_MS = 5000;
 /** Saved credentials per network (the testnet name predates mainnet support). */
 const store = (net: DeriveNet) => `ticket.derive.${net}.session`;
@@ -386,6 +424,85 @@ export class DeriveAccount {
     }
     void this.refresh();
     return results;
+  }
+
+  /**
+   * Asks market makers to quote a package (e.g. both legs of a bet) and returns the best firm
+   * quote, or null if none came within RFQ_WAIT_MS (the RFQ is then cancelled). Nothing trades
+   * until `rfqExecute`. The builder code rides on the RFQ.
+   */
+  async rfqQuote(legs: RfqLegIn[], direction: 'buy' | 'sell'): Promise<RfqQuote | null> {
+    const subaccountId = this.state.subaccountId;
+    if (subaccountId === null) throw new Error('No subaccount');
+    const wire = legs.map((l) => ({ instrument_name: l.instrument, amount: l.amount, direction: l.direction }));
+    let rfqId: string;
+    try {
+      const rfq = await this.sdk.send('private/send_rfq', {
+        subaccount_id: subaccountId,
+        legs: wire,
+        label: 'ticket',
+        ...(BUILDER.code ? { referral_code: BUILDER.code, ...(BUILDER.extraFee ? { extra_fee: String(BUILDER.extraFee) } : {}) } : {}),
+      });
+      rfqId = rfq.rfq_id;
+    } catch (e) {
+      throw new Error(explainError(e, this.net));
+    }
+    const sdkLegs = legs.map((l) => ({ instrumentName: l.instrument, amount: l.amount, direction: l.direction }));
+    const start = Date.now();
+    let firstAt = 0;
+    let best: RfqQuote | null = null;
+    while (Date.now() - start < RFQ_WAIT_MS && !(firstAt && Date.now() - firstAt >= RFQ_SETTLE_MS)) {
+      await new Promise((r) => setTimeout(r, RFQ_POLL_MS));
+      try {
+        const res = await this.sdk.rfq.getBestQuote({ subaccountId, rfqId, direction, legs: sdkLegs });
+        const q = res.best_quote;
+        if (!q || !res.is_valid) continue;
+        const prices: Record<string, number> = {};
+        let net = 0;
+        for (const l of q.legs) {
+          prices[l.instrument_name] = num(l.price);
+          net += (l.direction === 'buy' ? 1 : -1) * num(l.price) * num(l.amount);
+        }
+        best = {
+          rfqId,
+          direction,
+          quote: { rfq_id: q.rfq_id, quote_id: q.quote_id, direction: q.direction, legs: q.legs },
+          // The quote's legs are the RFQ's legs, from the taker's side; selling the package reverses them.
+          premium: direction === 'buy' ? net : -net,
+          fee: num(res.estimated_fee),
+          maxFee: res.suggested_max_fee,
+          prices,
+        };
+        if (!firstAt) firstAt = Date.now();
+      } catch {
+        /* keep polling */
+      }
+    }
+    if (!best) await this.rfqCancel(rfqId);
+    return best;
+  }
+
+  /** Executes a quote from `rfqQuote`: the whole package fills at its prices, or nothing does. */
+  async rfqExecute(q: RfqQuote): Promise<RfqFill> {
+    const subaccountId = this.state.subaccountId;
+    if (subaccountId === null) throw new Error('No subaccount');
+    try {
+      const res = await this.sdk.rfq.executeQuote({ subaccountId, quote: q.quote as never, maxFee: q.maxFee, label: 'ticket' });
+      // A fraction of the package (1 = all of it); read a percentage the same way.
+      const raw = num(res.fill_pct);
+      const filled = raw > 1 ? raw / 100 : raw;
+      return { ok: filled > 0, filled, fee: num(res.fee), error: filled > 0 ? null : `Not filled (${res.status})` };
+    } catch (e) {
+      return { ok: false, filled: 0, fee: 0, error: explainError(e, this.net) };
+    } finally {
+      void this.refresh();
+    }
+  }
+
+  async rfqCancel(rfqId: string) {
+    const subaccountId = this.state.subaccountId;
+    if (subaccountId === null) return;
+    await this.sdk.rfq.cancelRfq({ subaccountId, rfqId }).catch(() => {});
   }
 
   async cancel(orderId: string, instrument: string) {

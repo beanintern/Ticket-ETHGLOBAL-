@@ -4,16 +4,18 @@
 //   npm run check:easy
 //
 // For several assets and zooms it checks the grid, then bets on boxes above and below the price:
-//   1. the grid: boxes never overlap, each column ends exactly on its listed expiry, and every
-//      box edge is a strike listed for that expiry
-//   2. every box: "above" if its band is above the index, "below" if below, and its share price
-//      equals an independent Black-Scholes value of the spread per $1, exactly (never rounded up);
-//      boxes under 1¢ or over 99¢ are marked unavailable and clicking them does nothing
-//   3. betting on a box: the card shows its share price, "Show underlying positions" lists the
-//      two options (right expiry, strikes and sides), a bet under the minimum can't be placed,
-//      buying $X costs at most $X including Derive's fees (sizes on Derive's 0.01-contract grid,
-//      at least 0.1), and the shares' legs pay exactly $1 past the far strike, $0 on the losing
-//      side and 50¢ at the middle
+//   1. the grid: boxes never overlap, each column ends exactly on its listed expiry, every box
+//      edge is a strike listed for that expiry, and boxes reach past every edge of the visible
+//      chart (so none pop in while panning), wherever the listed strikes go that far
+//   2. every box: "above" if its band is above the index, "below" if below; its fair price equals
+//      an independent Black-Scholes value of the spread per $1, and its preview (the price shown)
+//      the RFQ markup on the spread, max($0.10, 1.5% × √(spread price × index)), on top: never below fair;
+//      only boxes under 0.2¢ fair or over 99¢ preview are unavailable, and those can't be clicked
+//   3. betting on a box: the card shows its preview, "Show underlying positions" lists the two
+//      options (right expiry, strikes and sides), a bet under the minimum can't be placed, a paper
+//      bet fills at the preview's leg prices and costs at most $X with RFQ fees (sizes on Derive's
+//      0.01-contract grid, at least 0.1), and the shares' legs pay exactly $1 past the far strike,
+//      $0 on the losing side and 50¢ at the middle
 //   4. the bet is listed, and selling it removes it
 import { chromium } from 'playwright';
 import { preview } from 'vite';
@@ -50,10 +52,13 @@ const PRICER = `(() => {
       return baseIv * (0.93 + 0.07 * Math.min(1, t * 6)) * (1 + 0.12 * m * m - 0.04 * m);
     };
     const T = (b.expiry - now) / YEAR, w = b.hi - b.lo;
-    const v = b.dir === 'above'
-      ? (bs('C', spot, b.lo, T, ivOf(b.lo, T)) - bs('C', spot, b.hi, T, ivOf(b.hi, T))) / w
-      : (bs('P', spot, b.hi, T, ivOf(b.hi, T)) - bs('P', spot, b.lo, T, ivOf(b.lo, T))) / w;
-    return Math.min(1, Math.max(0, v));
+    const [t, kb, ks] = b.dir === 'above' ? ['C', b.lo, b.hi] : ['P', b.hi, b.lo];
+    const pb = bs(t, spot, kb, T, ivOf(kb, T)), ps = bs(t, spot, ks, T, ivOf(ks, T));
+    // The RFQ markup on the whole spread, split half to each leg (the sold leg can't go below 0).
+    const e = Math.max(0.1, 0.015 * Math.sqrt(Math.max(pb - ps, 0) * spot));
+    const sellAt = Math.max(0, ps - e / 2), buyAt = pb + e - (ps - sellAt);
+    const clamp = (v) => Math.min(1, Math.max(0, v));
+    return { fair: clamp((pb - ps) / w), preview: clamp((buyAt - sellAt) / w), legs: [buyAt, sellAt] };
   };
 })()`;
 
@@ -91,15 +96,32 @@ for (const [asset, horizon, colFrac, chance, stake] of cases) {
       const wantDir = (b.lo + b.hi) / 2 >= K.spot ? 'above' : 'below';
       if (b.dir !== wantDir) out.push(`box ${b.lo}/${b.hi} is "${b.dir}", its middle is ${wantDir} the index`);
       const want = price(asset, K.spot, K.now, b);
-      if (Math.abs(b.price - want) > Math.max(0.0005, want * 0.01)) out.push(`box ${b.lo}/${b.hi} ${new Date(b.expiry).toISOString().slice(5, 10)}: ${(b.price * 100).toFixed(2)}¢, independent ${(want * 100).toFixed(2)}¢`);
-      const off = want < 0.01 || want > 0.99;
-      if (off !== !!b.unavailable) out.push(`box ${b.lo}/${b.hi} at ${(want * 100).toFixed(2)}¢ is ${b.unavailable ? '' : 'not '}marked unavailable`);
+      if (Math.abs(b.price - want.fair) > Math.max(0.0005, want.fair * 0.01)) out.push(`box ${b.lo}/${b.hi} ${new Date(b.expiry).toISOString().slice(5, 10)}: fair ${(b.price * 100).toFixed(2)}¢, independent ${(want.fair * 100).toFixed(2)}¢`);
+      if (Math.abs(b.preview - want.preview) > Math.max(0.0005, want.preview * 0.01)) out.push(`box ${b.lo}/${b.hi} ${new Date(b.expiry).toISOString().slice(5, 10)}: preview ${(b.preview * 100).toFixed(2)}¢, independent ${(want.preview * 100).toFixed(2)}¢`);
+      if (b.preview < b.price - 1e-12) out.push(`box ${b.lo}/${b.hi}: preview ${(b.preview * 100).toFixed(2)}¢ is below fair ${(b.price * 100).toFixed(2)}¢`);
+      const off = want.fair < 0.002 || want.preview > 0.99;
+      if (off !== !!b.unavailable) out.push(`box ${b.lo}/${b.hi} at ${(want.fair * 100).toFixed(2)}¢ fair, ${(want.preview * 100).toFixed(2)}¢ preview is ${b.unavailable ? '' : 'not '}marked unavailable`);
       for (let j = i + 1; j < boxes.length; j++) {
         const c = boxes[j];
         const xo = Math.min(b.x1, c.x1) - Math.max(b.x0, c.x0);
         const yo = Math.min(b.y1, c.y1) - Math.max(b.y0, c.y0);
         if (xo > 0.5 && yo > 0.5) out.push(`boxes ${b.lo}/${b.hi} and ${c.lo}/${c.hi} overlap`);
       }
+    }
+    // Coverage: the last column runs past the right edge, and in each column the boxes reach past
+    // the top and bottom edges, wherever listed strikes go that far.
+    const G = K.geom;
+    const cols = [...new Set(boxes.map((b) => b.expiry))];
+    if (Math.max(...boxes.map((b) => b.x1)) < G.plotR) {
+      const later = window.__ticket.expiries(asset).some((e) => K.tToX(e) >= G.plotR);
+      if (later) out.push(`columns stop at x=${Math.max(...boxes.map((b) => b.x1)).toFixed(0)}, before the right edge ${G.plotR.toFixed(0)}, though a later expiry is listed`);
+    }
+    for (const e of cols) {
+      const inCol = boxes.filter((b) => b.expiry === e);
+      const ks = window.__ticket.strikes(asset, e);
+      const top = Math.min(...inCol.map((b) => b.y0)), bottom = Math.max(...inCol.map((b) => b.y1));
+      if (top > G.plotT + 0.5 && K.pToY(ks[ks.length - 1]) <= G.plotT) out.push(`column ${new Date(e).toISOString().slice(5, 10)} stops at y=${top.toFixed(0)}, below the top edge, though strikes go higher`);
+      if (bottom < G.plotB - 0.5 && K.pToY(ks[0]) >= G.plotB) out.push(`column ${new Date(e).toISOString().slice(5, 10)} stops at y=${bottom.toFixed(0)}, above the bottom edge, though strikes go lower`);
     }
     return { out: out.slice(0, 6), boxes };
   }, { asset, PRICER });
@@ -122,7 +144,7 @@ for (const [asset, horizon, colFrac, chance, stake] of cases) {
     await page.waitForSelector('.bet-card');
     // 3. Card, underlying positions, purchase.
     const shown = (await page.textContent('.bet-price .num')).trim();
-    const c = pick.price * 100;
+    const c = pick.preview * 100;
     const want = c >= 9.95 ? `${Math.round(c)}¢` : `${(Math.round(c * 10) / 10).toFixed(1)}¢`;
     if (shown !== want) fail(`card shows ${shown}, box is ${want}`);
     // Under the minimum: can't buy.
@@ -158,12 +180,17 @@ for (const [asset, horizon, colFrac, chance, stake] of cases) {
     if (Math.abs(payAt((b.lo + b.hi) / 2) - 0.5) > 1e-9) fail(`pays ${payAt((b.lo + b.hi) / 2)} in the middle, not 50¢`);
     const qty = pos.legs[0].qty;
     if (Math.abs(qty * 100 - Math.round(qty * 100)) > 1e-6 || qty < 0.1) fail(`${qty} contracts isn't a size Derive accepts`);
-    // Premium plus Derive's fees on both legs, independently: $0.50 + min(0.03% of the index, 12.5% of the price) per contract.
+    // Paper fills at the preview's leg prices (bought leg marked up, sold leg down).
     const spot = await page.evaluate(() => window.__chart.spot);
+    const ref = await page.evaluate(({ asset, PRICER, b }) => (0, eval)(PRICER)(asset, window.__chart.spot, window.__chart.now, b), { asset, PRICER, b: pick });
+    pos.legs.forEach((l, i) => {
+      if (Math.abs(l.entry - ref.legs[i]) > Math.max(0.01, ref.legs[i] * 0.01)) fail(`leg ${i + 1} filled at $${l.entry.toFixed(3)}, preview $${ref.legs[i].toFixed(3)}`);
+    });
+    // Premium plus RFQ fees, independently: one $0.50 base fee + min(0.03% of the index, 12.5% of the price) per contract on each leg.
     const premium = pos.legs.reduce((a, l) => a + l.side * l.qty * l.entry, 0);
-    const fees = pos.legs.reduce((a, l) => a + 0.5 + Math.min(0.0003 * spot, 0.125 * l.entry) * l.qty, 0);
+    const fees = 0.5 + pos.legs.reduce((a, l) => a + Math.min(0.0003 * spot, 0.125 * l.entry) * l.qty, 0);
     const paid = premium + fees;
-    const step = (premium + fees - 1) / qty * 0.01;
+    const step = ((premium + fees - 0.5) / qty) * 0.01;
     if (paid > bet + 1e-6 || paid < bet - step - 0.01) fail(`bet costs $${paid.toFixed(2)} (incl. $${fees.toFixed(2)} fees) for a $${bet} stake`);
     if (Math.abs(b.entry * b.shares - paid) > 1e-6) fail(`recorded $${(b.entry * b.shares).toFixed(2)} in, cost $${paid.toFixed(2)}`);
     // 4. Listed, then sold.

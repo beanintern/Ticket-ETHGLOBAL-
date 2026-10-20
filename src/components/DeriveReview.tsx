@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { OrderPreview, OrderResult } from '../account/derive';
+import type { OrderPreview, OrderResult, RfqFill, RfqQuote } from '../account/derive';
 import { BUILDER, SLIPPAGE, type LegOrder, type OrderMode } from '../account/orders';
 import { usd } from '../lib/format';
 import type { Leg } from '../lib/strategy';
@@ -14,6 +14,10 @@ export interface Trading {
   subaccountId: number | null;
   prepare: (legs: Leg[], mode: OrderMode) => Promise<{ orders: LegOrder[]; previews: OrderPreview[] }>;
   place: (orders: LegOrder[], mode: OrderMode) => Promise<OrderResult[]>;
+  /** RFQ for a package of legs (bought or sold as a whole): the best firm quote, or null if none came. */
+  rfqQuote: (legs: Leg[], direction: 'buy' | 'sell') => Promise<RfqQuote | null>;
+  rfqExecute: (q: RfqQuote) => Promise<RfqFill>;
+  rfqCancel: (q: RfqQuote) => Promise<void>;
 }
 
 type Prepared = { orders: LegOrder[]; previews: OrderPreview[] };

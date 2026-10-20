@@ -440,3 +440,4 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .eligibility a { color: var(--long); }
 .data-credit { color: var(--dim); font-size: 11px; white-space: nowrap; }
 .data-credit a { color: inherit; }
+.sell-ask { display: inline-flex; gap: 10px; }

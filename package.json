@@ -14,7 +14,8 @@
     "check:live": "node scripts/check-live.mjs",
     "check:draw": "vite build && node scripts/check-draw.mjs",
     "check:easy": "vite build && node scripts/check-easy.mjs",
-    "check:deposit": "node scripts/check-deposit.mjs"
+    "check:deposit": "node scripts/check-deposit.mjs",
+    "check:rfq": "node scripts/check-rfq.mjs"
   },
   "dependencies": {
     "@derivexyz/derive-ts": "^3.0.29",

@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { DeriveAccount, loadCredentials, type AccountState, type Credentials, type OrderResult, type Portfolio } from './account/derive';
+import { DeriveAccount, loadCredentials, type AccountState, type Credentials, type OrderResult, type Portfolio, type RfqFill, type RfqQuote } from './account/derive';
 import { NETS, type DeriveNet } from './account/network';
 import { forgetSessionKey, hasMetaMask, metaMaskSigner, registerSessionKey, savedSessionKey } from './account/metamask';
-import { instrumentName, legOrders, type LegOrder, type OrderMode } from './account/orders';
+import { instrumentName, legOrders, onGrid, type OrderMode } from './account/orders';
 import type { Trading } from './components/DeriveReview';
 import { AccountButton, AccountPanel } from './components/AccountPanel';
 import { Chart, TOOL_LEG, type ChartView, type LegTool, type Tool } from './components/Chart';
 import { fitPath, payoffAlongPath, type PathPoint } from './lib/pathfit';
-import { betCost, betLegs, betQuestion, fmtCents, minStake, quoteBet, sizeBet, type BetQuote } from './lib/binary';
-import { EasyPanel, sharePrice } from './components/EasyPanel';
+import { betLegs, betQuestion, fmtCents, minStake, quoteBet, sizeBet, type BetQuote } from './lib/binary';
+import { EasyPanel, sellEstimate, sharePrice } from './components/EasyPanel';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
 import { bsPrice } from './lib/bs';
@@ -386,22 +386,21 @@ export default function App() {
       setToast(q.unavailable ?? `The minimum bet here is $${minStake(q, markets[q.asset].spot)}.`);
       return;
     }
-    const { shares, fees } = size;
-    const legs = betLegs(q, shares);
-    const m = buildModel(legs, markets[q.asset], now);
+    const { shares, fees, premium, cost } = size;
+    // Paper bets fill at the preview (the price shown), never better than a real RFQ would.
+    const legs = betLegs(q, shares).map((l, i) => ({ ...l, entry: q.previewLegPrices[i] }));
     const pos: Position = {
       id: newId('pos'),
       asset: q.asset,
       name: `${betQuestion(q.asset, q.dir, q.level)} · ${expiryLabel(q.expiry)}`,
-      legs: legs.map((l, i) => ({ ...l, entry: m.marks[i] })),
+      legs,
       openedAt: now,
       openSpot: markets[q.asset].spot,
-      // What was paid per share: the legs at mark plus Derive's fees.
-      bet: { dir: q.dir, level: q.level, lo: q.lo, hi: q.hi, expiry: q.expiry, shares, entry: (m.cost + fees) / shares },
+      bet: { dir: q.dir, level: q.level, lo: q.lo, hi: q.hi, expiry: q.expiry, shares, entry: cost / shares },
     };
     setPositions((ps) => [pos, ...ps]);
     setPick(null);
-    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${fmtCents(m.cost / shares)} plus ${usd(fees, 2)} fees: ${pos.name} (paper)`);
+    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${fmtCents(premium / shares)} plus ${usd(fees, 2)} fees: ${pos.name} (paper)`);
   };
   const easyLayer = easy
     ? {
@@ -569,6 +568,20 @@ export default function App() {
         return { orders, previews: await account.preview(orders, mode) };
       },
       place: (orders, mode) => account.place(orders, mode),
+      rfqQuote: async (legs, direction) => {
+        const instruments = await account.instruments(legs.map(instrumentName));
+        const rfqLegs = legs.map((l) => {
+          const name = instrumentName(l);
+          const spec = instruments.get(name);
+          if (!spec) throw new Error(`${name} isn't listed on Derive`);
+          const amount = onGrid(l.qty, spec.amountStep, 'down');
+          if (Number(amount) < spec.minAmount) throw new Error(`Too small: Derive's minimum is ${spec.minAmount} contracts per option.`);
+          return { instrument: name, amount, direction: (l.side > 0 ? 'buy' : 'sell') as 'buy' | 'sell' };
+        });
+        return account.rfqQuote(rfqLegs, direction);
+      },
+      rfqExecute: (q) => account.rfqExecute(q),
+      rfqCancel: (q) => account.rfqCancel(q.rfqId),
     };
   }, [account, subaccountId, canTrade, markets]);
 
@@ -606,32 +619,14 @@ export default function App() {
     }
   };
 
-  // Easy mode on Derive: a bet is its two legs, sent together (the buy first, so a
-  // half-filled bet leaves a bought option, never a naked sale).
-  const buyBetLive = async (q: BetQuote, orders: LegOrder[], estFees: number) => {
+  // Easy mode on Derive: a bet is both legs bought together by RFQ, filled at a maker's quote.
+  const onBoughtLive = (q: BetQuote, quote: RfqQuote, fill: RfqFill) => {
     if (!trading) return;
-    const results = await trading.place(orders, 'market');
-    const gap = q.hi - q.lo;
-    const allFilled = results.length === orders.length && results.every((r) => r.ok && r.filled > 0);
-    if (!allFilled) {
-      const first = results[0];
-      if (first?.ok && first.filled > 0)
-        setToast(
-          `Only part of the bet went through: bought ${first.filled} ${first.order.instrument} but the other leg didn't fill. You hold that option: see Pro › Positions to close it.`,
-        );
-      else reportOrders(results, 'Bet');
-      return;
-    }
-    const amount = Math.min(...results.map((r) => r.filled));
-    const shares = amount * gap;
-    // Fills don't report fees, so use Derive's estimate from the quote, scaled to what filled.
-    const ordered = Math.min(...orders.map((o) => Number(o.amount)));
-    const fees = ordered > 0 ? estFees * (amount / ordered) : 0;
-    const cost = betCost(
-      results.map((r, i) => ({ direction: r.order.direction, amount, price: r.averagePrice, fee: i === 0 ? fees : 0 })),
-      gap,
-    );
-    const legs = betLegs(q, shares).map((l, i) => ({ ...l, entry: results[i].averagePrice }));
+    const contracts = Number(quote.quote.legs[0]?.amount ?? 0) * fill.filled;
+    const shares = contracts * (q.hi - q.lo);
+    const legs = betLegs(q, shares).map((l) => ({ ...l, entry: quote.prices[instrumentName(l)] ?? 0 }));
+    const fee = fill.fee || quote.fee * fill.filled;
+    const paid = quote.premium * fill.filled + fee;
     const pos: Position = {
       id: newId('pos'),
       asset: q.asset,
@@ -640,40 +635,39 @@ export default function App() {
       openedAt: now,
       openSpot: markets[q.asset].spot,
       venue: trading.info.venue,
-      bet: { dir: q.dir, level: q.level, lo: q.lo, hi: q.hi, expiry: q.expiry, shares, entry: cost.perShare },
+      bet: { dir: q.dir, level: q.level, lo: q.lo, hi: q.hi, expiry: q.expiry, shares, entry: paid / shares },
     };
     setPositions((ps) => [pos, ...ps]);
     setPick(null);
-    const extra = results.some((r) => r.filled > amount + 1e-9) ? ' (one leg filled a little more; the extra shows in Pro › Positions)' : '';
-    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${fmtCents(cost.perShare)} on ${trading.info.name}: ${pos.name}${extra}`);
+    setToast(
+      `Bought ${shares.toFixed(1)} Yes shares at ${fmtCents(paid / shares)} (fees included) on ${trading.info.name}: ${pos.name}${fill.filled < 1 ? ` (${Math.round(fill.filled * 100)}% filled)` : ''}`,
+    );
   };
 
-  // Selling a bet held on Derive: close the sold leg first, then the bought one, reduce-only.
-  const sellBet = async (id: string) => {
-    const pos = positions.find((p) => p.id === id);
-    if (!pos) return;
-    if (!pos.venue) return closePosition(id);
+  /** Why a bet held on Derive can't be sold from here right now, or null. */
+  const sellBlocked = (pos: Position): string | null => {
+    if (!pos.venue) return null;
     const where = pos.venue === 'derive-mainnet' ? NETS.mainnet : NETS.testnet;
-    if (!account || account.net !== where.net) {
-      setToast(`This bet is on ${where.name}: ${net === where.net ? 'connect your account' : `switch to ${where.real ? 'Live' : 'Testnet'} and connect`} to sell it.`);
-      return;
-    }
-    try {
-      const closing = [...pos.legs].sort((a, b) => a.side - b.side);
-      const instruments = await account.instruments(closing.map(instrumentName));
-      const results = await account.place(legOrders(closing, markets[pos.asset], instruments, 'market', true), 'market');
-      if (!results.every((r) => r.ok && r.filled > 0)) {
-        reportOrders(results, 'Sell');
-        return;
-      }
-      const proceeds = results.reduce((a, r) => a + (r.order.direction === 'sell' ? 1 : -1) * r.averagePrice * r.filled, 0);
-      const paid = pos.bet ? pos.bet.entry * pos.bet.shares : 0;
-      setPositions((ps) => ps.filter((p) => p.id !== id));
-      setClosed((c) => [{ id, asset: pos.asset, name: pos.name, openedAt: pos.openedAt, closedAt: now, realized: proceeds - paid }, ...c]);
-      setToast(`Sold on ${where.name}: ${pos.name} (${signedUsd(proceeds - paid)})`);
-    } catch (e) {
-      setToast(`Couldn't sell: ${(e as Error).message}`);
-    }
+    if (trading && account?.net === where.net) return null;
+    return `This bet is on ${where.name}: ${net === where.net ? 'connect your account' : `switch to ${where.real ? 'Live' : 'Testnet'} and connect`} to sell it.`;
+  };
+
+  const closeBet = (pos: Position, proceeds: number, where: string) => {
+    const paid = pos.bet ? pos.bet.entry * pos.bet.shares : 0;
+    setPositions((ps) => ps.filter((p) => p.id !== pos.id));
+    setClosed((c) => [{ id: pos.id, asset: pos.asset, name: pos.name, openedAt: pos.openedAt, closedAt: now, realized: proceeds - paid }, ...c]);
+    setToast(`Sold${where}: ${pos.name} (${signedUsd(proceeds - paid)})`);
+  };
+  // Paper: sold at the conservative estimate the Sell button shows.
+  const sellBetPaper = (id: string) => {
+    const pos = positions.find((p) => p.id === id);
+    if (pos) closeBet(pos, sellEstimate(pos, markets, now).proceeds, ' (paper)');
+  };
+  // On Derive: sold by RFQ, at a maker's quote for the whole spread (RFQs fill all-or-nothing).
+  const onSoldLive = (id: string, quote: RfqQuote, fill: RfqFill) => {
+    const pos = positions.find((p) => p.id === id);
+    if (!pos || !trading) return;
+    closeBet(pos, -quote.premium - (fill.fee || quote.fee), ` on ${trading.info.name}`);
   };
 
   const placeOrder = () => {
@@ -949,7 +943,7 @@ export default function App() {
                 <span>
                   <i className="sw sw-loss" /> Ends below
                 </span>
-                <span className="hint">Each box is a share's price: it pays $1 if the price ends past it on that date · drag to pan · scroll to zoom</span>
+                <span className="hint">Each box is the most a share should cost; it pays $1 if the price ends past it on that date · drag to pan · scroll to zoom</span>
                 <span className="hint-touch">Tap a box to bet · a share pays $1 if the price ends past it</span>
               </>
             ) : (
@@ -997,10 +991,11 @@ export default function App() {
             onCancel={() => setPick(null)}
             onBuy={buyBet}
             bets={bets}
-            onSell={(id) => void sellBet(id)}
+            onSellPaper={sellBetPaper}
+            sellBlocked={sellBlocked}
             venue={
               trading
-                ? { kind: 'live', trading, onBuyLive: buyBetLive }
+                ? { kind: 'live', trading, onBoughtLive, onSoldLive }
                 : accountEnabled
                   ? { kind: 'connect', info: NETS[net!], onConnect: () => setAccountOpen(true) }
                   : { kind: 'paper' }

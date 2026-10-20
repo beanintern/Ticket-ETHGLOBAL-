@@ -3,13 +3,18 @@
 // "Will ETH be above $L on <expiry>?" is a call spread between the two listed strikes around L
 // (+1 call at the lower, −1 call at the upper), sized so the gap between them is $1: it pays $1
 // per share if ETH settles above the upper strike, $0 below the lower, and a straight-line
-// amount in between. "Below" is the mirror image with puts. With rates ~0, the spread's price
-// per $1 is the market's implied probability of finishing past the midpoint L, which is what
-// the share is priced (and labelled) at.
+// amount in between. "Below" is the mirror image with puts. With rates ~0, the spread's fair price
+// per $1 is the market's implied probability of finishing past the midpoint L.
+//
+// Bets trade by RFQ: market makers quote the whole spread, so any listed strikes can be bet on,
+// book or no book. Until someone asks, there's no firm price, so each bet shows a preview set on
+// the expensive side of where makers usually quote (`rfqEdge`): the firm quote is usually better,
+// rarely worse.
 import type { Market } from '../data/types';
 import { bsPrice } from './bs';
 import { YEAR, type Asset } from './market';
 import { newId, type Leg } from './strategy';
+import { BUILDER } from '../account/orders';
 
 export type BetDir = 'above' | 'below';
 
@@ -22,24 +27,46 @@ export interface BetQuote {
   hi: number;
   /** The question's price level: halfway between the strikes. */
   level: number;
-  /** Price of one $1 share, 0–1 (also the implied probability of "Yes"), exactly, not rounded. */
+  /** Fair price of one $1 share, 0–1: the implied probability of "Yes", exactly, not rounded. */
   price: number;
-  /** Each leg's price per contract (bought leg, then sold leg). */
+  /** What a share is expected to cost at most by RFQ, 0–1 (before fees): the price shown. */
+  preview: number;
+  /** Each leg's fair price per contract (bought leg, then sold leg). */
   legPrices: [number, number];
-  /** Why this bet can't be placed (too unlikely, too certain, or nobody quoting a leg), or null. */
+  /** The preview's leg prices: the bought leg marked up, the sold leg marked down. */
+  previewLegPrices: [number, number];
+  /** Why this bet can't be placed (too unlikely to price, or nothing to win), or null. */
   unavailable: string | null;
 }
 
 /**
- * Derive's rules for option orders (the same on mainnet and testnet): sizes in 0.01-contract
- * steps, at least 0.1 contracts, and each order pays a $0.50 base fee plus 0.03% of the index per
- * contract, that part capped at 12.5% of the option's price.
+ * How far from mark a maker's RFQ price for a whole spread is expected to be, on the expensive
+ * side, per contract: max(one $0.10 tick, 1.5% × √(spread's fair price × index)). Makers quote the
+ * package, so it scales with the spread, not its legs. Calibrated on Derive mainnet's two-leg
+ * vertical spreads traded by RFQ over 30 days to October 2026 (634 trades): it's at least what the
+ * taker actually paid over mark in 98% of them for ETH and BTC alike (96–97% for narrow spreads),
+ * typically by 3–5¢ a share on a narrow band.
+ */
+export const RFQ_EDGE = 0.015;
+export const rfqEdge = (spreadMark: number, spot: number) => Math.max(0.1, RFQ_EDGE * Math.sqrt(Math.max(spreadMark, 0) * spot));
+
+/** Leg prices with a package edge split between them (half each way; whatever the sold leg can't give, the bought one takes). */
+function edgedLegs(buyPx: number, sellPx: number, edge: number): [number, number] {
+  const sellAt = Math.max(0, sellPx - edge / 2);
+  return [buyPx + edge - (sellPx - sellAt), sellAt];
+}
+
+/**
+ * Derive's rules for options (the same on mainnet and testnet): sizes in 0.01-contract steps, at
+ * least 0.1 contracts. An RFQ taker pays one $0.50 base fee plus, per contract, 0.03% of the index
+ * capped at 12.5% of the option's price, on the dearer leg of a two-leg spread (the other leg is
+ * free; checked against Derive's public RFQ trades). Estimates here charge both legs, to be safe.
  */
 export const DERIVE_OPTION = { minAmount: 0.1, amountStep: 0.01, baseFee: 0.5, takerRate: 0.0003, feeCap: 0.125 };
-/** Smallest bet: keeps the two $0.50 base fees to a tenth of the stake or less. */
+/** Smallest bet: keeps the $0.50 base fee a small part of the stake. */
 export const MIN_BET = 10;
-/** Bets are offered between these share prices: below 1¢ a share is a lottery ticket nobody makes a market in, above 99¢ there's nothing to win. */
-export const MIN_PRICE = 0.01;
+/** Below this fair price (0.2¢ a share) there's nothing to price; at a preview over 99¢ nothing to win. */
+export const MIN_FAIR = 0.002;
 export const MAX_PRICE = 0.99;
 
 export interface BetInfo {
@@ -79,23 +106,28 @@ export function quoteBet(market: Market, asset: Asset, expiry: number, price: nu
   const buyPx = bsPrice(type, spot, buyK, T, market.iv(type, buyK, expiry, now));
   const sellPx = bsPrice(type, spot, sellK, T, market.iv(type, sellK, expiry, now));
   const p = Math.min(1, Math.max(0, (buyPx - sellPx) / w));
+  const [buyAt, sellAt] = edgedLegs(buyPx, sellPx, rfqEdge(buyPx - sellPx, spot));
+  const preview = Math.min(1, Math.max(0, (buyAt - sellAt) / w));
   let unavailable: string | null = null;
-  if (p < MIN_PRICE) unavailable = 'Under a 1% chance: too unlikely to offer';
-  else if (p > MAX_PRICE) unavailable = 'Over a 99% chance: nothing to win';
-  else {
-    // On Derive, the bought leg needs someone selling it and the sold leg someone buying it.
-    const bq = market.quote(type, buyK, expiry);
-    const sq = market.quote(type, sellK, expiry);
-    if (bq && !(bq.ask && bq.ask > 0)) unavailable = `Nobody is selling the ${buyK} ${type === 'C' ? 'call' : 'put'} right now`;
-    else if (sq && !(sq.bid && sq.bid > 0)) unavailable = `Nobody is buying the ${sellK} ${type === 'C' ? 'call' : 'put'} right now`;
-  }
-  return { asset, expiry, dir, lo, hi, level: (lo + hi) / 2, price: p, legPrices: [buyPx, sellPx], unavailable };
+  if (p < MIN_FAIR) unavailable = 'Under a 0.2% chance: too unlikely to price';
+  else if (preview > MAX_PRICE) unavailable = 'Costs over 99¢ a share: nothing to win';
+  return { asset, expiry, dir, lo, hi, level: (lo + hi) / 2, price: p, preview, legPrices: [buyPx, sellPx], previewLegPrices: [buyAt, sellAt], unavailable };
 }
 
-/** Derive's fee for one option order of `contracts` at `price` each, with the index at `spot`. */
-export function optionFee(contracts: number, price: number, spot: number): number {
+/**
+ * Estimated RFQ taker fee for a spread of `contracts` with these leg prices: both legs charged (an
+ * overestimate), plus this app's builder fee, which Derive charges as a fixed amount on each leg.
+ */
+export function rfqFee(contracts: number, prices: number[], spot: number, builderFee = BUILDER.code ? BUILDER.extraFee : 0): number {
   const { baseFee, takerRate, feeCap } = DERIVE_OPTION;
-  return baseFee + Math.min(takerRate * spot, feeCap * price) * contracts;
+  return baseFee + prices.reduce((a, px) => a + Math.min(takerRate * spot, feeCap * Math.max(px, 0)), 0) * contracts + builderFee * prices.length;
+}
+
+/** What selling a bet's shares is expected to fetch at least by RFQ, per share, 0–1 (before fees). */
+export function previewBid(q: Pick<BetQuote, 'legPrices' | 'lo' | 'hi'>, spot: number): number {
+  const [held, sold] = q.legPrices;
+  const w = q.hi - q.lo;
+  return Math.min(1, Math.max(0, (held - sold - rfqEdge(held - sold, spot)) / w));
 }
 
 export interface BetSize {
@@ -109,23 +141,24 @@ export interface BetSize {
 }
 
 /**
- * The bet that `stake` dollars buys at the quoted prices, fees included, rounded down to a size
- * Derive accepts. Null if that's under Derive's minimum order.
+ * The bet that `stake` dollars buys at the preview price, fees included, rounded down to a size
+ * Derive accepts. Null if that's under Derive's minimum. A firm quote at or below the preview
+ * costs no more than this.
  */
 export function sizeBet(q: BetQuote, stake: number, spot: number): BetSize | null {
-  const { baseFee, takerRate, feeCap, amountStep, minAmount } = DERIVE_OPTION;
-  const [b, s] = q.legPrices;
-  // Cost per contract of the pair, fees' per-contract part included; the base fees are fixed.
-  const perContract = b - s + Math.min(takerRate * spot, feeCap * b) + Math.min(takerRate * spot, feeCap * s);
+  const { baseFee, amountStep, minAmount } = DERIVE_OPTION;
+  // Cost per contract of the spread, fees' per-contract part included; the base fee is fixed.
+  const perContract = betOfSize(q, 1, spot).cost - baseFee;
   if (!(perContract > 0)) return null;
-  const contracts = Math.floor(((stake - 2 * baseFee) / perContract + 1e-9) / amountStep) * amountStep;
+  const contracts = Math.floor(((stake - baseFee) / perContract + 1e-9) / amountStep) * amountStep;
   return contracts >= minAmount - 1e-9 ? betOfSize(q, contracts, spot) : null;
 }
 
+/** A bet of `contracts` at the preview price, with estimated RFQ fees. */
 export function betOfSize(q: BetQuote, contracts: number, spot: number): BetSize {
-  const [b, s] = q.legPrices;
+  const [b, s] = q.previewLegPrices;
   const premium = (b - s) * contracts;
-  const fees = optionFee(contracts, b, spot) + optionFee(contracts, s, spot);
+  const fees = rfqFee(contracts, q.previewLegPrices, spot);
   return { contracts, shares: contracts * (q.hi - q.lo), premium, fees, cost: premium + fees };
 }
 
@@ -158,25 +191,3 @@ export function sharePayoff(b: Pick<BetInfo, 'dir' | 'lo' | 'hi'>, S: number): n
 }
 
 export const betQuestion = (asset: Asset, dir: BetDir, level: number) => `${asset} ${dir} $${Math.round(level).toLocaleString('en-US')}`;
-
-/** One leg of a bet as sent to (or quoted by) the exchange. */
-export interface BetFill {
-  direction: 'buy' | 'sell';
-  /** Contracts. */
-  amount: number;
-  price: number;
-  fee: number;
-}
-
-/**
- * The real cost of a bet on the exchange from its legs' quotes or fills: net premium plus fees,
- * and per share. A share needs every leg, so the shares you actually get are limited by the
- * least-filled leg.
- */
-export function betCost(legs: BetFill[], strikeGap: number): { cost: number; fees: number; shares: number; perShare: number } {
-  const shares = legs.length ? Math.min(...legs.map((l) => l.amount)) * strikeGap : 0;
-  const premium = legs.reduce((a, l) => a + (l.direction === 'buy' ? 1 : -1) * l.price * l.amount, 0);
-  const fees = legs.reduce((a, l) => a + l.fee, 0);
-  const cost = premium + fees;
-  return { cost, fees, shares, perShare: shares > 0 ? cost / shares : 0 };
-}

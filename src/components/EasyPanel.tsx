@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import type { OrderPreview } from '../account/derive';
-import type { LegOrder } from '../account/orders';
+import type { RfqFill, RfqQuote } from '../account/derive';
 import type { Trading } from './DeriveReview';
-import { betCost, betLegs, betQuestion, fmtCents, fmtChance, MIN_BET, minStake, sharePayoff, sizeBet, type BetQuote } from '../lib/binary';
+import { betLegs, betQuestion, fmtCents, fmtChance, MIN_BET, minStake, previewBid, rfqFee, sharePayoff, sizeBet, type BetQuote } from '../lib/binary';
 import { instrumentName } from '../account/orders';
 import { signedUsd, usd } from '../lib/format';
 import { expiryLabel, type Asset } from '../lib/market';
@@ -21,100 +20,113 @@ interface Props {
   stake: number;
   onStake: (v: number) => void;
   onCancel: () => void;
+  /** Paper bet at the preview price. */
   onBuy: (q: BetQuote, stake: number) => void;
   bets: Position[];
-  onSell: (id: string) => void;
-  /** Paper bets, a prompt to connect (Derive data, no account), or real orders on Derive (mainnet or testnet). */
-  venue: { kind: 'paper' } | { kind: 'connect'; info: NetInfo; onConnect: () => void } | { kind: 'live'; trading: Trading; onBuyLive: (q: BetQuote, orders: LegOrder[], estFees: number) => Promise<void> };
+  /** Paper sale at the estimate the Sell button shows. */
+  onSellPaper: (id: string) => void;
+  /** Why a bet held on Derive can't be sold from here right now (wrong network, not connected), or null. */
+  sellBlocked: (pos: Position) => string | null;
+  /** Paper bets, a prompt to connect (Derive data, no account), or real bets on Derive by RFQ (mainnet or testnet). */
+  venue:
+    | { kind: 'paper' }
+    | { kind: 'connect'; info: NetInfo; onConnect: () => void }
+    | {
+        kind: 'live';
+        trading: Trading;
+        onBoughtLive: (q: BetQuote, quote: RfqQuote, fill: RfqFill) => void;
+        onSoldLive: (id: string, quote: RfqQuote, fill: RfqFill) => void;
+      };
 }
 
-/** Exchange errors a bettor can act on, in plain words. */
-function friendlyError(msg: string, q: BetQuote): string {
-  if (/minimum size is ([\d.]+)/i.test(msg)) {
-    const min = Number(/minimum size is ([\d.]+)/i.exec(msg)![1]);
-    const shares = min * (q.hi - q.lo);
-    return `Too small for Derive: the minimum here is ${shares.toFixed(0)} shares, about $${Math.ceil(shares * q.price)} at the fair price. Increase the amount.`;
-  }
-  if (/zero liquidity|no liquidity/i.test(msg)) return 'Nobody is quoting one of these options on Derive right now. Try a nearer date or a price closer to today’s.';
-  return msg;
-}
-
-type LiveQuote = { key: string; orders: LegOrder[]; previews: OrderPreview[] } | { key: string; error: string };
-
-/** Current price of one share of a bet: the legs' value now, per share. */
+/** Current fair price of one share of a bet: the legs' value at mark, per share. */
 export function sharePrice(pos: Position, markets: Record<Asset, Market>, now: number): number {
   const m = buildModel(pos.legs, markets[pos.asset], now);
   return pos.bet ? Math.min(1, Math.max(0, m.value / pos.bet.shares)) : 0;
 }
 
-export function EasyPanel({ asset, now, markets, pending, stake, onStake: setStake, onCancel, onBuy, bets, onSell, venue }: Props) {
+/** What selling a bet is expected to fetch at least by RFQ, after estimated fees: what Sell shows. */
+export function sellEstimate(pos: Position, markets: Record<Asset, Market>, now: number): { perShare: number; proceeds: number } {
+  if (!pos.bet || pos.legs.length < 2) return { perShare: 0, proceeds: 0 };
+  const market = markets[pos.asset];
+  const [held, sold] = buildModel(pos.legs, market, now).marks;
+  const perShare = previewBid({ legPrices: [held, sold], lo: pos.bet.lo, hi: pos.bet.hi }, market.spot);
+  const fees = rfqFee(pos.legs[0].qty, [held, sold], market.spot);
+  return { perShare, proceeds: Math.max(0, perShare * pos.bet.shares - fees) };
+}
+
+/** Buying or selling by RFQ: confirm (real money), collect quotes, then fill or ask. */
+type Flow =
+  | { kind: 'idle' }
+  | { kind: 'confirm' }
+  | { kind: 'quoting' }
+  | { kind: 'none' }
+  | { kind: 'worse'; quote: RfqQuote; total: number }
+  | { kind: 'filling' }
+  | { kind: 'error'; message: string };
+
+export function EasyPanel({ asset, now, markets, pending, stake, onStake: setStake, onCancel, onBuy, bets, onSellPaper, sellBlocked, venue }: Props) {
   const spot = pending ? markets[pending.asset].spot : 0;
-  // What the stake buys at the quoted prices, Derive's fees included, on Derive's size grid.
+  // What the stake buys at the preview price, Derive's fees included, on Derive's size grid.
   const size = pending ? sizeBet(pending, stake, spot) : null;
   const minBet = pending ? minStake(pending, spot) : 0;
   const tooSmall = !!pending && stake < minBet;
-  const fairShares = size?.shares ?? 0;
-
-  // Live (a connected Derive account): ask Derive for a dry run of both legs, so the card shows the real cost.
+  const shares = size?.shares ?? 0;
+  const blocked = !size || tooSmall || !!pending?.unavailable;
   const live = venue.kind === 'live' ? venue : null;
-  const quoteKey = live && pending && !pending.unavailable && !tooSmall && size ? `${pending.asset}|${pending.expiry}|${pending.dir}|${pending.lo}|${pending.hi}|${stake}` : '';
-  const [liveQuote, setLiveQuote] = useState<LiveQuote | null>(null);
-  const [sending, setSending] = useState(false);
-  // Real money (mainnet): Buy and Sell each take a second, confirming click.
-  const [confirmBuy, setConfirmBuy] = useState('');
-  const [confirmSell, setConfirmSell] = useState<string | null>(null);
-  useEffect(() => {
-    if (!quoteKey || !live || !pending) return;
-    let alive = true;
-    const gapNow = pending.hi - pending.lo;
-    // Quote at the fair price first, then resize once at Derive's real price (spread and fees
-    // included), so what you pay is the amount you entered.
-    const quote = async () => {
-      const first = await live.trading.prepare(betLegs(pending, fairShares), 'market');
-      const c = betCost(first.orders.map((o, i) => ({ direction: o.direction, amount: first.previews[i].fillAmount, price: first.previews[i].fillPrice, fee: first.previews[i].fee })), gapNow);
-      if (!(c.perShare > 0) || Math.abs(c.cost - stake) < stake * 0.02) return first;
-      return live.trading.prepare(betLegs(pending, stake / c.perShare), 'market');
-    };
-    const t = setTimeout(() => {
-      quote()
-        .then((r) => alive && setLiveQuote({ key: quoteKey, ...r }))
-        .catch((e) => alive && setLiveQuote({ key: quoteKey, error: friendlyError((e as Error).message, pending) }));
-    }, 350);
-    return () => {
-      alive = false;
-      clearTimeout(t);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [quoteKey]);
-  const lq = liveQuote && liveQuote.key === quoteKey ? liveQuote : null;
-  const gap = pending ? pending.hi - pending.lo : 1;
-  const liveOk = lq && 'orders' in lq ? lq : null;
-  const liveShares = liveOk ? Math.min(...liveOk.orders.map((o) => Number(o.amount))) * gap : 0;
-  const liveCost = liveOk
-    ? betCost(
-        liveOk.orders.map((o, i) => ({ direction: o.direction, amount: liveOk.previews[i].fillAmount, price: liveOk.previews[i].fillPrice, fee: liveOk.previews[i].fee })),
-        gap,
-      )
-    : null;
-  const liveInvalid = liveOk?.previews.find((p) => !p.valid)?.reason ?? null;
-  const partial = liveCost && liveCost.shares < liveShares - 1e-9;
-  const shares = live ? liveShares : fairShares;
 
-  // The options behind the bet: the exact orders when live, else the legs at their marks.
+  // A new box or amount starts the buy over (and drops a quote for the old one).
+  const buyKey = pending ? `${pending.asset}|${pending.expiry}|${pending.lo}|${pending.hi}|${stake}` : '';
+  const [buy, setBuy] = useState<Flow>({ kind: 'idle' });
+  const worseRef = useRef<RfqQuote | null>(null);
+  useEffect(() => {
+    setBuy({ kind: 'idle' });
+    if (worseRef.current && live) void live.trading.rfqCancel(worseRef.current);
+    worseRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buyKey]);
+
+  const fillBuy = async (quote: RfqQuote) => {
+    if (!live || !pending) return;
+    setBuy({ kind: 'filling' });
+    worseRef.current = null;
+    const fill = await live.trading.rfqExecute(quote);
+    if (fill.ok) {
+      setBuy({ kind: 'idle' });
+      live.onBoughtLive(pending, quote, fill);
+    } else setBuy({ kind: 'error', message: `Couldn’t fill that quote: ${fill.error ?? 'rejected'}. Try again for a fresh one.` });
+  };
+
+  const startBuy = async () => {
+    if (!live || !pending || !size || blocked) return;
+    if (live.trading.info.real && buy.kind !== 'confirm') {
+      setBuy({ kind: 'confirm' });
+      return;
+    }
+    setBuy({ kind: 'quoting' });
+    try {
+      const quote = await live.trading.rfqQuote(betLegs(pending, shares), 'buy');
+      if (!quote) {
+        setBuy({ kind: 'none' });
+        return;
+      }
+      const total = quote.premium + quote.fee;
+      // At or under the preview: fill it. Over it: show the real price and ask.
+      if (total <= size.cost + 0.005) await fillBuy(quote);
+      else {
+        worseRef.current = quote;
+        setBuy({ kind: 'worse', quote, total });
+      }
+    } catch (e) {
+      setBuy({ kind: 'error', message: (e as Error).message });
+    }
+  };
+
+  // The options behind the bet, at the preview's prices (the most paid, the least received).
   const [showLegs, setShowLegs] = useState(false);
-  const underlying = (() => {
-    if (!pending) return [];
-    if (liveOk)
-      return liveOk.orders.map((o, i) => ({
-        instrument: o.instrument,
-        buy: o.direction === 'buy',
-        amount: o.amount,
-        price: liveOk.previews[i].fillAmount > 0 ? liveOk.previews[i].fillPrice : Number(o.limitPrice),
-      }));
-    const legs = betLegs(pending, fairShares);
-    const marks = buildModel(legs, markets[pending.asset], now).marks;
-    return legs.map((l, i) => ({ instrument: instrumentName(l), buy: l.side > 0, amount: l.qty.toFixed(2), price: marks[i] }));
-  })();
+  const underlying = pending
+    ? betLegs(pending, shares).map((l, i) => ({ instrument: instrumentName(l), buy: l.side > 0, amount: l.qty.toFixed(2), price: pending.previewLegPrices[i] }))
+    : [];
   const u0Text = pending
     ? `Each contract is on 1 ${pending.asset}. The two strikes are $${(pending.hi - pending.lo).toLocaleString('en-US')} apart, so ${underlying[0]?.amount ?? '–'} contracts pay up to $${shares.toFixed(2)}: $1 for each of your ${shares.toFixed(1)} shares.`
     : '';
@@ -124,10 +136,42 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
   useEffect(() => {
     if (pickKey && window.innerWidth <= 960) cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [pickKey]);
+
+  // Selling, per bet.
+  const [sells, setSells] = useState<Record<string, Flow>>({});
+  const setSell = (id: string, f: Flow) => setSells((s) => ({ ...s, [id]: f }));
+  const fillSell = async (pos: Position, quote: RfqQuote) => {
+    if (!live) return;
+    setSell(pos.id, { kind: 'filling' });
+    const fill = await live.trading.rfqExecute(quote);
+    if (fill.ok) {
+      setSell(pos.id, { kind: 'idle' });
+      live.onSoldLive(pos.id, quote, fill);
+    } else setSell(pos.id, { kind: 'error', message: `Couldn’t fill: ${fill.error ?? 'rejected'}` });
+  };
+  const startSell = async (pos: Position) => {
+    if (!pos.venue) return onSellPaper(pos.id);
+    const why = sellBlocked(pos);
+    if (why || !live) return setSell(pos.id, { kind: 'error', message: why ?? 'Connect your account to sell this bet.' });
+    const flow = sells[pos.id]?.kind ?? 'idle';
+    if (live.trading.info.real && flow !== 'confirm') return setSell(pos.id, { kind: 'confirm' });
+    setSell(pos.id, { kind: 'quoting' });
+    try {
+      const quote = await live.trading.rfqQuote(pos.legs, 'sell');
+      if (!quote) return setSell(pos.id, { kind: 'none' });
+      const total = -quote.premium - quote.fee;
+      if (total >= sellEstimate(pos, markets, now).proceeds - 0.005) await fillSell(pos, quote);
+      else setSell(pos.id, { kind: 'worse', quote, total });
+    } catch (e) {
+      setSell(pos.id, { kind: 'error', message: (e as Error).message });
+    }
+  };
+
   const open = bets.filter((b) => b.bet && b.bet.expiry > now);
   const settled = bets.filter((b) => b.bet && b.bet.expiry <= now);
   const value = open.reduce((a, b) => a + sharePrice(b, markets, now) * b.bet!.shares, 0);
   const cost = open.reduce((a, b) => a + b.bet!.entry * b.bet!.shares, 0);
+  const busy = buy.kind === 'quoting' || buy.kind === 'filling';
 
   return (
     <aside className="sidebar easy" aria-label="Predict">
@@ -141,8 +185,8 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               on that box's date.
             </p>
             <p className="fine">
-              Each box shows the price of a share that pays $1 if you're right: <b>25¢</b> means the market gives it a 25% chance, and $10 buys 40 shares
-              (less Derive's fees). Further away and sooner is cheaper. Faint boxes can't be traded right now. Bets start at $10.
+              Each box shows the most a share that pays $1 if you're right should cost: <b>25¢</b> means about a 25% chance, and $10 buys about 40 shares
+              (less Derive's fees). When you buy, market makers quote a firm price, usually lower. Further away and sooner is cheaper. Bets start at $10.
             </p>
           </div>
         ) : (
@@ -157,9 +201,9 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               Will {asset} be {pending.dir} ${Math.round(pending.level).toLocaleString('en-US')} on {expiryLabel(pending.expiry)}?
             </h2>
             <div className="bet-price">
-              <span className="num">{cents(pending.price)}</span>
+              <span className="num">{cents(pending.preview)}</span>
               <span>
-                a share · {fmtChance(pending.price)} chance
+                a share at most · fair {cents(pending.price)}, a {fmtChance(pending.price)} chance
                 <br />
                 each share pays $1 if right
               </span>
@@ -183,105 +227,83 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             ) : tooSmall ? (
               <p className="form-error">
                 The minimum bet here is {usd(minBet, 0)}
-                {minBet > MIN_BET
-                  ? ": Derive's smallest order (0.1 contracts) plus its $0.50 fee on each of the two options."
-                  : ', so the $0.50 Derive fee on each of the two options stays a small part of it.'}
+                {minBet > MIN_BET ? ": Derive's smallest order (0.1 contracts) plus its fee." : ', so the $0.50 Derive fee stays a small part of it.'}
               </p>
             ) : null}
-            {!live && size && !tooSmall && !pending.unavailable && size.fees > size.cost * 0.1 && (
-              <p className="fine">
-                Derive's fees are {Math.round((size.fees / size.cost) * 100)}% of this bet: each option pays a $0.50 base fee plus up to 12.5% of its price.
-              </p>
+            {size && !tooSmall && !pending.unavailable && size.fees > size.cost * 0.1 && (
+              <p className="fine">Derive's fees are up to {Math.round((size.fees / size.cost) * 100)}% of this bet: a $0.50 base fee plus up to 12.5% of the options' price.</p>
             )}
             <dl className="bet-sum">
               <div>
                 <dt>Shares</dt>
-                <dd className="num">{tooSmall || pending.unavailable ? '–' : shares.toFixed(1)}</dd>
+                <dd className="num">{blocked ? '–' : shares.toFixed(1)}</dd>
               </div>
-              {!live && (
-                <div>
-                  <dt>Derive fees</dt>
-                  <dd className="num">{size && !tooSmall ? usd(size.fees, 2) : '–'}</dd>
-                </div>
-              )}
+              <div>
+                <dt>Derive fees</dt>
+                <dd className="num">{blocked ? '–' : `≤ ${usd(size!.fees, 2)}`}</dd>
+              </div>
               <div>
                 <dt>If Yes, you get</dt>
-                <dd className="num up">{tooSmall || pending.unavailable ? '–' : usd(shares, 2)}</dd>
+                <dd className="num up">{blocked ? '–' : usd(shares, 2)}</dd>
               </div>
               <div>
                 <dt>Profit if right</dt>
-                <dd className="num up">{tooSmall || pending.unavailable ? '–' : signedUsd(shares - (live ? (liveCost?.cost ?? 0) : (size?.cost ?? 0)))}</dd>
+                <dd className="num up">{blocked ? '–' : `≥ ${signedUsd(shares - size!.cost)}`}</dd>
               </div>
             </dl>
             {live ? (
               <div className="bet-live">
-                {!lq ? (
-                  <p className="fine">Checking {live.trading.info.name}…</p>
-                ) : 'error' in lq ? (
-                  <p className="form-error">{lq.error}</p>
-                ) : (
-                  <div className="live-cost">
-                    <div>
-                      <span>On {live.trading.info.name}</span>
-                      <b className="num">{liveCost && liveCost.shares > 0 ? cents(liveCost.perShare) : '–'}</b>
-                      <span className="fine">per share · fair {cents(pending.price)}</span>
-                    </div>
-                    <div>
-                      <span>Cost now</span>
-                      <b className="num">{liveCost ? usd(liveCost.cost) : '–'}</b>
-                      <span className="fine">incl. {liveCost ? usd(liveCost.fees) : '–'} fees</span>
-                    </div>
-                  </div>
-                )}
-                {liveInvalid && <p className="form-error">{liveInvalid}</p>}
-                {liveCost && liveCost.perShare >= 1 && (
-                  <p className="form-error">At this price a share costs more than the $1 it can pay: don't buy.</p>
-                )}
-                {liveCost && liveCost.perShare < 1 && liveCost.perShare - pending.price > Math.max(0.1, pending.price * 0.5) && (
-                  <p className="form-error">
-                    Thin market: you'd pay {cents(liveCost.perShare)} for a {fmtChance(pending.price)} chance. Try a nearer date or price, or bet on paper.
-                  </p>
-                )}
-                {partial && !liveInvalid && (
-                  <p className="fine">Only {liveCost!.shares.toFixed(1)} shares can fill right now; the rest of the order is cancelled.</p>
-                )}
                 {live.trading.canTrade === false && <p className="form-error">This session key can't trade: reconnect to create a trading key.</p>}
-                {live.trading.info.real && confirmBuy === quoteKey && (
+                {buy.kind === 'confirm' && (
                   <p className="real-note">
-                    Real money: this spends {liveCost ? usd(liveCost.cost, 2) : '–'} USDC from your Derive account. Click again to place the two orders.
+                    Real money: spends up to {usd(size?.cost ?? 0, 2)} USDC from your Derive account. Market makers quote a firm price; it buys at once if that's at
+                    or under this, and asks you if it's more. Click again to get quotes.
                   </p>
                 )}
-                <button
-                  className={`primary ${live.trading.info.real && confirmBuy === quoteKey ? 'is-confirm' : ''}`}
-                  disabled={!liveOk || !!liveInvalid || !liveCost || liveCost.shares <= 0 || liveCost.perShare >= 1 || sending || live.trading.canTrade === false}
-                  onClick={async () => {
-                    if (!liveOk) return;
-                    if (live.trading.info.real && confirmBuy !== quoteKey) {
-                      setConfirmBuy(quoteKey);
-                      return;
-                    }
-                    setConfirmBuy('');
-                    setSending(true);
-                    try {
-                      await live.onBuyLive(pending, liveOk.orders, liveCost?.fees ?? 0);
-                    } finally {
-                      setSending(false);
-                    }
-                  }}
-                >
-                  {sending
-                    ? 'Sending…'
-                    : live.trading.info.real && confirmBuy === quoteKey
-                      ? `Confirm: buy for ${liveCost ? usd(liveCost.cost, 2) : '–'} USDC`
-                      : `Buy Yes on ${live.trading.info.name} · ${liveCost ? usd(liveCost.cost, 2) : usd(stake, 0)}`}
-                </button>
-                <button className="link" disabled={!size || tooSmall || !!pending.unavailable} onClick={() => onBuy(pending, stake)}>
+                {buy.kind === 'none' && <p className="form-error">No market maker quoted this just now. Try again in a moment, or pick another box.</p>}
+                {buy.kind === 'error' && <p className="form-error">{buy.message}</p>}
+                {buy.kind === 'worse' ? (
+                  <>
+                    <p className="form-error">
+                      The best quote is {usd(buy.total, 2)} for {shares.toFixed(1)} shares ({cents(buy.quote.premium / shares)} a share), above the{' '}
+                      {usd(size?.cost ?? 0, 2)} shown.
+                    </p>
+                    <button className="primary" onClick={() => void fillBuy(buy.quote)}>
+                      Buy at {usd(buy.total, 2)}
+                    </button>
+                    <button
+                      className="link"
+                      onClick={() => {
+                        void live.trading.rfqCancel(buy.quote);
+                        worseRef.current = null;
+                        setBuy({ kind: 'idle' });
+                      }}
+                    >
+                      Don't buy
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className={`primary ${buy.kind === 'confirm' ? 'is-confirm' : ''}`}
+                    disabled={blocked || busy || live.trading.canTrade === false}
+                    onClick={() => void startBuy()}
+                  >
+                    {buy.kind === 'quoting'
+                      ? 'Getting quotes…'
+                      : buy.kind === 'filling'
+                        ? 'Buying…'
+                        : buy.kind === 'confirm'
+                          ? `Confirm: buy for up to ${usd(size?.cost ?? 0, 2)} USDC`
+                          : `Buy Yes on ${live.trading.info.name} · up to ${size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}`}
+                  </button>
+                )}
+                <button className="link" disabled={blocked || busy} onClick={() => onBuy(pending, stake)}>
                   Paper bet instead
                 </button>
               </div>
             ) : (
               <>
-                <button className="primary" disabled={!size || tooSmall || !!pending.unavailable} onClick={() => onBuy(pending, stake)}>
+                <button className="primary" disabled={blocked} onClick={() => onBuy(pending, stake)}>
                   Buy Yes · {size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}
                   {venue.kind === 'connect' ? ' (paper)' : ''}
                 </button>
@@ -298,8 +320,8 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             {showLegs && (
               <div className="underlying">
                 <p className="fine">
-                  This bet is a {pending.dir === 'above' ? 'call' : 'put'} spread on Derive: {live ? 'these orders are sent' : 'these positions are opened (paper)'}{' '}
-                  when you buy.
+                  This bet is a {pending.dir === 'above' ? 'call' : 'put'} spread on Derive, bought as one package by RFQ. Prices are the preview's: at most this
+                  for the option bought, at least this for the one sold.
                 </p>
                 <table>
                   <tbody>
@@ -314,16 +336,14 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                     ))}
                   </tbody>
                 </table>
-                <p className="fine">
-                  {u0Text}
-                </p>
+                <p className="fine">{u0Text}</p>
               </div>
             )}
             <p className="fine">
               {(() => {
                 const [win, lose] = pending.dir === 'above' ? [pending.hi, pending.lo] : [pending.lo, pending.hi];
                 const [winWord, loseWord] = pending.dir === 'above' ? ['above', 'below'] : ['below', 'above'];
-                return `Pays $1 per share if ${asset} settles ${winWord} $${win.toLocaleString('en-US')} on ${expiryLabel(pending.expiry)}, nothing ${loseWord} $${lose.toLocaleString('en-US')}, and part-way in between. Built from a ${pending.lo}/${pending.hi} ${pending.dir === 'above' ? 'call' : 'put'} spread; you can sell any time before. ${live ? `On ${live.trading.info.name}${live.trading.info.real ? ' with real USDC' : ''}: two orders sent together, the buy first, each filling now within 3% of the best price or cancelled.` : 'Paper trade.'}`;
+                return `Pays $1 per share if ${asset} settles ${winWord} $${win.toLocaleString('en-US')} on ${expiryLabel(pending.expiry)}, nothing ${loseWord} $${lose.toLocaleString('en-US')}, and part-way in between. Built from a ${pending.lo}/${pending.hi} ${pending.dir === 'above' ? 'call' : 'put'} spread; you can sell any time before. ${live ? `On ${live.trading.info.name}${live.trading.info.real ? ' with real USDC' : ''}: market makers quote both options as one package, which fills whole or not at all.` : 'Paper trade, at the price shown.'}`;
               })()}
             </p>
           </div>
@@ -345,6 +365,8 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               const done = bet.expiry <= now;
               const px = done ? sharePayoff(bet, markets[b.asset].spot) : sharePrice(b, markets, now);
               const pnl = (px - bet.entry) * bet.shares;
+              const est = done ? null : sellEstimate(b, markets, now);
+              const flow = sells[b.id] ?? { kind: 'idle' };
               return (
                 <li key={b.id} className={bet.dir}>
                   <div className="bet-row">
@@ -358,20 +380,41 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                     <span className="num">
                       {usd(bet.entry * bet.shares)} in · {done ? 'settled' : 'now'} {usd(px * bet.shares)} · wins {usd(bet.shares)}
                     </span>
-                    {!done && (
-                      <button
-                        className={`link ${confirmSell === b.id ? 'is-confirm' : ''}`}
-                        onClick={() => {
-                          // Selling a real-money bet takes a confirming click.
-                          if (b.venue === 'derive-mainnet' && confirmSell !== b.id) return setConfirmSell(b.id);
-                          setConfirmSell(null);
-                          onSell(b.id);
-                        }}
-                      >
-                        {confirmSell === b.id ? `Confirm sell ~${usd(px * bet.shares)}` : `Sell ${usd(px * bet.shares)}`}
-                      </button>
-                    )}
+                    {est &&
+                      (flow.kind === 'worse' ? (
+                        <span className="sell-ask">
+                          <button className="link is-confirm" onClick={() => void fillSell(b, flow.quote)}>
+                            Sell for {usd(flow.total)}
+                          </button>
+                          <button
+                            className="link"
+                            onClick={() => {
+                              if (live) void live.trading.rfqCancel(flow.quote);
+                              setSell(b.id, { kind: 'idle' });
+                            }}
+                          >
+                            Keep
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          className={`link ${flow.kind === 'confirm' ? 'is-confirm' : ''}`}
+                          disabled={flow.kind === 'quoting' || flow.kind === 'filling'}
+                          onClick={() => void startSell(b)}
+                        >
+                          {flow.kind === 'quoting'
+                            ? 'Getting quotes…'
+                            : flow.kind === 'filling'
+                              ? 'Selling…'
+                              : flow.kind === 'confirm'
+                                ? `Confirm: sell for at least ${usd(est.proceeds)}`
+                                : `Sell ${b.venue ? '≥ ' : ''}${usd(est.proceeds)}`}
+                        </button>
+                      ))}
                   </div>
+                  {flow.kind === 'worse' && <p className="fine">The best bid is {usd(flow.total)} after fees, under the {usd(est?.proceeds ?? 0)} shown.</p>}
+                  {flow.kind === 'none' && <p className="fine">No market maker bid for it just now. Try again in a moment.</p>}
+                  {flow.kind === 'error' && <p className="form-error">{flow.message}</p>}
                   <div className="bet-bar" aria-hidden="true">
                     <div style={{ width: `${Math.round(px * 100)}%` }} />
                   </div>

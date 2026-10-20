@@ -64,6 +64,7 @@ N=200 SEED=7 npm run check:chart
 SEED=7 ONLY=113 npm run check:chart   # replay one case
 npm run check:live    # the live Derive layer against the real exchange
 NETWORK=testnet npm run check:live
+npm run check:rfq     # Easy mode's RFQ preview and fee estimate against Derive's real RFQ trades
 npm run check:deposit # the in-app deposit against Derive's real contracts (nothing is sent)
 NETWORK=testnet npm run check:deposit
 npm run check:draw    # draws paths with the mouse and checks the position built from each
@@ -82,16 +83,20 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
   butterflies on listed strikes and expiries, that at each butterfly's expiry the legs still
   alive then pay most within half a wing of the path (independent pricing), that the path is
   shown as a guide, and that undo restores the previous ticket.
-- `check:easy` checks the whole grid across assets and zooms (no overlapping boxes, columns
-  ending on their expiries, edges on listed strikes, the right direction, and every box's
-  share price against an independent spread valuation, exactly; boxes under 1¢ or over 99¢
-  unavailable and unclickable), then bets on boxes above and below the price: the card's share
-  price, the underlying positions listed, that a bet under the minimum can't be placed, that $X
-  buys a Derive-sized order costing at most $X with fees, that shares pay exactly $1 / $0 /
-  50¢, and that bets list and sell.
+- `check:easy` checks the whole grid across assets and zooms: no overlapping boxes, columns
+  ending on their expiries, edges on listed strikes, boxes reaching past every edge of the visible
+  chart, the right direction, and every box's fair price and preview against an independent
+  calculation (only boxes under 0.2¢ fair or over 99¢ preview unavailable, and unclickable). Then
+  it bets on boxes above and below the price: the card's preview, the underlying positions, that
+  a bet under the minimum can't be placed, that a paper bet fills at the preview's leg prices and
+  costs at most $X with RFQ fees on a Derive-sized order, that shares pay exactly $1 / $0 / 50¢,
+  and that bets list and sell.
 - `check:live` loads real Derive data with the app's own code and checks expiries, strikes,
   the index and history, that our pricing reproduces Derive's mark prices (within 0.5%), and
   that IV for unlisted strikes is interpolated sensibly.
+- `check:rfq` takes Derive mainnet's last 30 days of two-leg vertical spreads traded by RFQ and
+  checks the app's preview (`rfqEdge`) was at least what the taker paid over mark in 95%+ of them,
+  for ETH and BTC, and that the RFQ fee estimate is never below the fee Derive charged.
 - `check:deposit` runs the app's deposit code with a wallet that records transactions instead of
   sending them, then replays each deposit with `eth_call` against Derive's real contracts (USDC
   balance and allowance set by state override). It must succeed, revert without the approval,
@@ -120,35 +125,38 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
   switch (or `?mode=easy`) turns the chart into a betting grid, in the style of Euphoria. Columns
   run from one listed expiry to the next; rows are bands between listed strikes on that expiry
   (merged until they're tall enough to tap), so boxes differ in size: near-dated strikes are
-  finer. Each box is one bet: above the index, "ends above this band on that date"; below it,
-  "ends below". The box shows the price of a share that pays $1 if right, which is also the
-  market's implied chance (21¢ = 21%). Under the hood a bet is a call (or put) spread between the
-  band's strikes, sized so the gap is $1 per share: it pays $1 past the far strike, $0 on the
-  losing side and part-way inside the band. Prices are exact (a 0.8¢ share shows 0.8¢, never
-  rounded up) and refresh with every market update.
-  Only bets that can really trade are offered: share prices between 1¢ and 99¢, and on Derive
-  data, the bought option must have a seller and the sold one a buyer (other boxes are faint
-  and can't be clicked). Bets start at $10, or more where Derive's smallest order (0.1
-  contracts) costs more (BTC bands are $1,000 wide). A stake buys what it would on Derive:
-  contracts rounded down to Derive's 0.01 step, and Derive's fees included ($0.50 per option
-  plus 0.03% of the index per contract, capped at 12.5% of the option's price). The card says
-  when fees are a big part of a bet, which happens on cheap far-away shares. The card shows
-  the share price, chance, shares, fees and payout, and **Show underlying positions** lists the
-  exact options opened (instrument, side, size, price). Placed bets are outlined on their box
-  with what went in and what they're worth now, and can be sold any time. There's no payoff map
-  in Easy mode.
+  finer. Every box even partly on screen is built (the column running off the right edge, the
+  bands crossing the top and bottom), labelled in its visible part, so none pop in while panning.
+  Each box is one bet: above the index, "ends above this band on that date"; below it, "ends
+  below". Under the hood a bet is a call (or put) spread between the band's strikes, sized so the
+  gap is $1 per share: it pays $1 past the far strike, $0 on the losing side and part-way inside
+  the band. Its fair price per share is the market's implied chance (21¢ = 21%).
 
-  With a Derive account connected, bets are real orders: real USDC on **Live**, test funds on
-  **Testnet**. On Live, Buy and Sell each take a second, confirming click that says how much USDC
-  is being spent. The card
-  asks Derive for a dry run of both legs and shows the real price per share (spread and fees
-  included) next to the fair price, sizing the bet so what you pay is the amount you entered.
-  It warns when the book is thin (e.g. 51¢ for a 10% chance) and refuses a share that would cost
-  more than $1. Buying sends both legs as immediate-or-cancel orders, the bought option first,
-  so a half-filled bet leaves a bought option, never a naked sale. A filled bet is recorded at
-  its fill prices (plus Derive's fee estimate) and tagged Derive; selling closes the sold leg
-  first, then the bought one, reduce-only. Without an account, bets are paper, with a link to
-  connect. The builder code rides on every order as usual.
+  **Bets trade by RFQ**, so every listed band can be bet on, book or no book: market makers quote
+  the whole spread as one package, which fills whole or not at all. Before anyone asks there's no
+  firm price, so each box shows a **preview**: the fair price plus a markup set on the expensive
+  side of where makers quote, max($0.10, 1.5% × √(spread's fair price × index)) per contract.
+  Against Derive mainnet's two-leg vertical spreads taken by RFQ over 30 days (634 trades), the
+  preview was at least what the taker paid in about 98% of them, typically 1–2¢ a share above it
+  (`npm run check:rfq` re-runs this). The firm quote is usually better than what you saw, rarely
+  worse. Boxes are blank only under 0.2¢ fair (nothing to price) or over 99¢ preview (nothing to
+  win). Bets start at $10, or more where Derive's smallest order (0.1 contracts) costs more. A
+  stake is sized at the preview with fees included: contracts rounded down to Derive's 0.01 step;
+  RFQ fees estimated high (Derive charges one $0.50 base fee plus, per contract, min(0.03% of the
+  index, 12.5% of the price) on the dearer leg only; the estimate charges both, plus any builder
+  fee on each leg). The card shows the preview, the fair price and chance, shares, fees (at most)
+  and payout; **Show underlying positions** lists the two options at the preview's leg prices.
+  Placed bets are outlined on their box with what went in and what they're worth now.
+
+  With a Derive account connected, bets are real: real USDC on **Live**, test funds on
+  **Testnet**. **Buy** sends an RFQ for the spread and collects quotes for a few seconds. If the
+  best costs no more than the preview (fees included), it fills at once; if it's more, the card
+  shows the real price and asks ("Buy at $Y" or "Don't buy"); if nobody quotes, it says so. On
+  Live, Buy first takes a confirming click saying how much USDC at most. **Sell** works the same
+  way the other way round: the button shows a conservative bid (fair value less the same markup
+  and fees), sells at once if a quote meets it, and asks otherwise. Without an account, bets are
+  paper: filled at the preview and sold at the bid shown, never better than a real RFQ would be.
+  The builder code rides on every RFQ.
 - **Draw path** (`src/lib/pathfit.ts`). Pick the Draw tool (`5`) and draw where you think price
   goes, left to right. On release the ticket becomes a position that pays off along that path:
   on each listed expiry the path spans (up to six, spread evenly, plus the next one if the path
@@ -242,8 +250,9 @@ VITE_DERIVE_EXTRA_FEE=0.1             # optional builder fee, USDC per order (0.
 
 With a code set, every order carries `referral_code` and `extra_fee`, the review panel shows the
 builder part of the fees, and Derive credits the fees to that code. Without one, orders go out
-with no builder fee. `extra_fee` is a total for the order, not per contract: Derive's max-fee rule
-divides it by the order's amount. Builder fees need the code registered in Derive's
+with no builder fee. `extra_fee` is a fixed amount per order (per leg trade in an RFQ), not per
+contract: Derive's max-fee rule divides it by the order's amount, and its public trade history shows
+it charged on each leg of an RFQ. Builder fees need the code registered in Derive's
 [API Broker program](https://docs.derive.xyz/integrators/programs/api-broker-program), applied
 for within two weeks of the first referred trade; fees are paid to the registered Derive wallet
 every four weeks.

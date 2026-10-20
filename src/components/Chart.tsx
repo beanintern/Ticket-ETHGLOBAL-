@@ -1362,7 +1362,8 @@ export function Chart(props: Props) {
     // ---- Easy mode: a grid of bets ----
     // Columns run from one listed expiry to the next; rows are bands between listed strikes on
     // that expiry (merged until tall enough to tap), so boxes differ in size. Each box is one bet:
-    // above the index, "ends above this band"; below it, "ends below". It shows its share price.
+    // above the index, "ends above this band"; below it, "ends below". It shows its preview share
+    // price: what a share is expected to cost at most by RFQ.
     let easyInfo: { q: BetQuote; box: EasyBox } | null = null;
     if (p.easy) {
       const easy = p.easy;
@@ -1428,7 +1429,7 @@ export function Chart(props: Props) {
         }
         const rgb = rgbOf(b.q.dir).join(',');
         // Longer odds (cheaper shares) glow brighter, like the numbers on a betting board.
-        const heat = Math.min(1, Math.log(1 / b.q.price) / Math.log(40));
+        const heat = Math.min(1, Math.log(1 / Math.max(b.q.preview, 0.01)) / Math.log(40));
         roundRect(ctx, x0, y0, x1 - x0, y1 - y0, 4);
         ctx.fillStyle = sel ? `rgba(${rgb},0.55)` : hov ? `rgba(${rgb},0.28)` : `rgba(${rgb},${0.03 + 0.07 * heat})`;
         ctx.fill();
@@ -1444,7 +1445,7 @@ export function Chart(props: Props) {
         if (vy1 - vy0 >= 12 && vx1 - vx0 >= 30) {
           ctx.font = `${sel || hov ? 700 : 600} ${vy1 - vy0 >= 18 ? 10.5 : 9.5}px ${MONO}`;
           ctx.fillStyle = sel ? '#0c0f14' : hov ? C.text : `rgba(${rgb},${0.45 + 0.55 * heat})`;
-          ctx.fillText(fmtCents(b.q.price), (vx0 + vx1) / 2, (vy0 + vy1) / 2 + 0.5);
+          ctx.fillText(fmtCents(b.q.preview), (vx0 + vx1) / 2, (vy0 + vy1) / 2 + 0.5);
         }
       }
       // Placed bets: an outline on their box, with the price paid and now.
@@ -1592,8 +1593,8 @@ export function Chart(props: Props) {
           lines.push({ text: `${betQuestion(spec.asset, q.dir, q.level)} on ${fmtTime(q.expiry, false)}`, bold: true, color: q.unavailable ? C.muted : col });
           if (q.unavailable) lines.push({ text: q.unavailable, color: C.muted });
           else {
-            lines.push({ text: `${fmtCents(q.price)} a share · pays $1 · ${fmtChance(q.price)} chance`, bold: true });
-            lines.push({ text: 'Click to bet', color: C.muted });
+            lines.push({ text: `Up to ${fmtCents(q.preview)} a share · pays $1 · ${fmtChance(q.price)} chance`, bold: true });
+            lines.push({ text: 'Click to bet · firm price when you buy', color: C.muted });
           }
         }
         if (!easyInfo) lines.push({ text: `${fmtTime(ht, true)} UTC · ${fmtPrice(hp, hp < 100 ? 2 : 0)}`, color: C.muted });
@@ -1661,7 +1662,7 @@ export function Chart(props: Props) {
         markers: markers.map((m) => ({ id: m.id, x: m.x + m.w / 2, y: m.y + m.h / 2 })),
         guide: p.guide,
         easyHover: easyInfo ? { ...easyInfo.q } : null,
-        easyBoxes: p.easy ? (easyGridRef.current?.boxes ?? []).map((b) => ({ expiry: b.expiry, lo: b.lo, hi: b.hi, x0: b.x0, x1: b.x1, y0: g.pToY(b.hi), y1: g.pToY(b.lo), price: b.q.price, dir: b.q.dir, unavailable: b.q.unavailable })) : null,
+        easyBoxes: p.easy ? (easyGridRef.current?.boxes ?? []).map((b) => ({ expiry: b.expiry, lo: b.lo, hi: b.hi, x0: b.x0, x1: b.x1, y0: g.pToY(b.hi), y1: g.pToY(b.lo), price: b.q.price, preview: b.q.preview, dir: b.q.dir, unavailable: b.q.unavailable })) : null,
         heat: heat && maxAbs > 1e-9 ? { x0: heat.x0, cell: heat.cell, cols: heat.cols, rows: heat.rows, contour: heat.contour } : null,
         pnl: pnlFn,
         draw,
