@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AssetInfo } from '../data/types';
 import { price as fmtPrice, signed } from '../lib/format';
 import { priceDecimalsFor, type Asset } from '../lib/market';
+import { TickFlash } from './TickFlash';
 
 // Token logos, bundled (small enough to inline): src/assets/tokens/<TICKER>.png|jpg.
 const LOGOS = Object.fromEntries(
@@ -104,7 +105,9 @@ export function AssetPicker({ assets, current, pending, onPick }: { assets: Asse
         ) : (
           cur && (
             <>
-              <span className="asset-px num">{fmtPrice(cur.spot, priceDecimalsFor(cur.spot))}</span>
+              <TickFlash value={cur.spot} className="asset-px num">
+                {fmtPrice(cur.spot, priceDecimalsFor(cur.spot))}
+              </TickFlash>
               {curChange !== null && <span className={`num wide-only ${curChange >= 0 ? 'up' : 'down'}`}>{signed(curChange)}%</span>}
             </>
           )

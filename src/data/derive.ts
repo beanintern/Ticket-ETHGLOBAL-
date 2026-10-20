@@ -5,7 +5,7 @@
 // plus subscriptions), which also avoids CORS: the REST endpoints don't allow browser origins
 // other than Derive's own. Read-only: no account, keys or signing are involved here.
 import { bsPrice, type OptType } from '../lib/bs';
-import { DAY, HOUR, MARKETS, YEAR, expiryLabel, parseStrike, specFor, type Asset, type Candle, type Expiry, type ExpiryKind, type MarketSpec, type TradeRules } from '../lib/market';
+import { DAY, MARKETS, MINUTE, YEAR, expiryLabel, parseStrike, specFor, type Asset, type Candle, type Expiry, type ExpiryKind, type MarketSpec, type TradeRules } from '../lib/market';
 import type { AssetInfo, Market, MarketSource, Quote } from './types';
 
 export interface DeriveNetwork {
@@ -298,10 +298,11 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
   const onSpot = (asset: Asset, price: number, ts: number) => {
     const st = stateOf(asset);
     st.spot = price;
-    const hour = Math.floor(ts / HOUR) * HOUR;
+    // Live ticks build 1-minute candles, carrying on from the loaded 1-minute history.
+    const minute = Math.floor(ts / MINUTE) * MINUTE;
     const last = st.candles[st.candles.length - 1];
     if (!last) return;
-    if (hour > last.t) st.candles.push({ t: hour, o: last.c, h: Math.max(last.c, price), l: Math.min(last.c, price), c: price });
+    if (minute > last.t) st.candles.push({ t: minute, o: last.c, h: Math.max(last.c, price), l: Math.min(last.c, price), c: price });
     else {
       last.c = price;
       last.h = Math.max(last.h, price);
@@ -350,17 +351,26 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
   async function loadHistory(asset: Asset) {
     const now = Math.floor(Date.now() / 1000);
     const span = 20 * 86400;
-    // Real OHLC candles: daily for the year before, hourly for the last 40 days.
+    // Real OHLC candles, finer towards now: daily for the year before, hourly for the last 40
+    // days, 5-minute for the last day and 1-minute for the last 6 hours (each call stays under
+    // Derive's 500-point limit). Each series covers up to where the next, finer one starts.
     type Oc = { open_price: string; high_price: string; low_price: string; close_price: string; timestamp: number };
     const chart = (start: number, end: number, period: number) =>
       sock.call<Oc[]>('public/get_index_chart_data', { currency: asset, start_timestamp: start, end_timestamp: end, period });
-    const [daily, hourly] = await Promise.all([chart(now - 2 * span - 400 * 86400, now - 2 * span, 86400), chart(now - 2 * span, now, 3600)]);
-    const hourlyFrom = (now - 2 * span) * 1000;
-    const candles: Candle[] = [...daily.map((c) => ({ ...c, daily: true })), ...hourly.map((c) => ({ ...c, daily: false }))]
-      .map((c) => ({ t: c.timestamp * 1000, o: Number(c.open_price), h: Number(c.high_price), l: Number(c.low_price), c: Number(c.close_price), daily: c.daily }))
-      .filter((c) => [c.o, c.h, c.l, c.c].every(Number.isFinite) && (c.daily ? c.t < hourlyFrom : c.t >= hourlyFrom))
-      .sort((a, b) => a.t - b.t)
-      .map(({ t, o, h, l, c }) => ({ t, o, h, l, c }));
+    const hourlyFrom = now - 2 * span;
+    const fiveFrom = Math.floor((now - 86400) / 3600) * 3600;
+    const oneFrom = Math.floor((now - 6 * 3600) / 300) * 300;
+    const series = await Promise.all([
+      chart(hourlyFrom - 400 * 86400, hourlyFrom, 86400).then((r) => ({ r, from: -Infinity, to: hourlyFrom })),
+      chart(hourlyFrom, now, 3600).then((r) => ({ r, from: hourlyFrom, to: fiveFrom })),
+      chart(fiveFrom, now, 300).then((r) => ({ r, from: fiveFrom, to: oneFrom })),
+      chart(oneFrom, now, 60).then((r) => ({ r, from: oneFrom, to: Infinity })),
+    ]);
+    const candles: Candle[] = series
+      .flatMap(({ r, from, to }) => r.filter((c) => c.timestamp >= from && c.timestamp < to))
+      .map((c) => ({ t: c.timestamp * 1000, o: Number(c.open_price), h: Number(c.high_price), l: Number(c.low_price), c: Number(c.close_price) }))
+      .filter((c) => [c.o, c.h, c.l, c.c].every(Number.isFinite))
+      .sort((a, b) => a.t - b.t);
     const st = stateOf(asset);
     st.candles = candles;
     if (!st.spot && candles.length) st.spot = candles[candles.length - 1].c;

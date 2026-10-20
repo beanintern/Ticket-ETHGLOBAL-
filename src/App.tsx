@@ -10,6 +10,7 @@ import { fitPath, payoffAlongPath, type PathPoint } from './lib/pathfit';
 import { betLegs, betQuestion, fmtCents, minStake, quoteBet, sizeBet, type BetQuote } from './lib/binary';
 import { EasyPanel, sellEstimate, sharePrice } from './components/EasyPanel';
 import { AssetPicker } from './components/AssetPicker';
+import { TickFlash } from './components/TickFlash';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
 import { bsPrice } from './lib/bs';
@@ -806,7 +807,9 @@ export default function App() {
         <div className="stats">
           <div>
             <span className="label">Index</span>
-            <span className="num">{fmtPrice(spot, spec.priceDecimals)}</span>
+            <TickFlash value={spot} className="num">
+              {fmtPrice(spot, spec.priceDecimals)}
+            </TickFlash>
           </div>
           <div>
             <span className="label">24h</span>
@@ -926,6 +929,7 @@ export default function App() {
               )}
               <div className="seg" role="group" aria-label="Time horizon">
                 {[
+                  ['1D', DAY],
                   ['1W', 7 * DAY],
                   ['3W', 21 * DAY],
                   ['2M', 60 * DAY],

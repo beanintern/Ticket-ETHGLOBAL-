@@ -471,3 +471,10 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .sell-ask { display: inline-flex; gap: 10px; }
 .group-setup > p { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
 .group-setup > p b { color: var(--text); }
+
+/* Live price ticks: a brief green or red flash on the number. */
+@keyframes tick-up { from { color: var(--profit); text-shadow: 0 0 10px rgba(46, 201, 139, 0.55); } }
+@keyframes tick-down { from { color: var(--loss); text-shadow: 0 0 10px rgba(239, 90, 85, 0.55); } }
+.tick-up { animation: tick-up 1.4s ease-out; }
+.tick-down { animation: tick-down 1.4s ease-out; }
+@media (prefers-reduced-motion: reduce) { .tick-up, .tick-down { animation: none; } }

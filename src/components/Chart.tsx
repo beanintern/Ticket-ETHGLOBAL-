@@ -119,6 +119,15 @@ const TOP_H = 28;
 const PAST_FRAC = 0.3;
 /** Furthest out you can zoom: past Derive's longest listed expiry (about a year). */
 const MAX_HORIZON = 430 * DAY;
+/** Closest you can zoom: half a day ahead, where 15-minute candles show. */
+const MIN_HORIZON = 0.5 * DAY;
+/** The price glides to each new tick over this long, and its flash fades over FLASH_MS. */
+const TICK_MS = 900;
+const FLASH_MS = 1400;
+const REDUCED_MOTION = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+const easeOut = (f: number) => 1 - (1 - f) ** 3;
+type Tick = { from: number; to: number; t0: number; dir: 0 | 1 | -1; asset: string };
+const glidePrice = (tk: Tick, t: number) => (REDUCED_MOTION ? tk.to : tk.from + (tk.to - tk.from) * easeOut(Math.min(1, Math.max(0, (t - tk.t0) / TICK_MS))));
 const CELL = 4;
 /** Coarser P&L map while the view is moving, refined once it settles. */
 const CELL_MOVING = 8;
@@ -238,6 +247,10 @@ export function Chart(props: Props) {
   const markersRef = useRef<Marker[]>([]);
   const geomRef = useRef<Geom | null>(null);
   const lastMoveRef = useRef(0);
+  // The live price on screen: glides from tick to tick (see glidePrice), and remembers the last move's direction.
+  const tickRef = useRef<Tick>({ from: 0, to: 0, t0: 0, dir: 0, asset: '' });
+  // Easy boxes whose price just changed, for a brief highlight.
+  const boxFlashRef = useRef(new Map<string, { preview: number; t: number }>());
   const zoomRef = useRef<{ horizon: number; yZoom: number; raf: number; cur: ChartView; sent: ChartView[] } | null>(null);
   /** Easy mode's grid of boxes, rebuilt when the view or prices change. */
   const easyGridRef = useRef<{ key: string; boxes: EasyBox[] } | null>(null);
@@ -320,6 +333,15 @@ export function Chart(props: Props) {
     try {
     const p = propsRef.current;
     const { spec, market, candles, spot, now, expiries, model, editableLegs, staticLegs, tool, selectedLegId, view } = p;
+    // Live price: a new tick starts a glide from wherever the price is shown now.
+    const frameT = performance.now();
+    const tk = tickRef.current;
+    if (tk.asset !== spec.asset || !tk.to) tickRef.current = { from: spot, to: spot, t0: frameT - TICK_MS, dir: 0, asset: spec.asset };
+    else if (spot !== tk.to) tickRef.current = { from: glidePrice(tk, frameT), to: spot, t0: frameT, dir: spot > tk.to ? 1 : -1, asset: spec.asset };
+    const live = tickRef.current;
+    const shownSpot = glidePrice(live, frameT);
+    const flash = REDUCED_MOTION || !live.dir ? 0 : Math.max(0, 1 - (frameT - live.t0) / FLASH_MS);
+    const flashRgb = (live.dir > 0 ? C.profit : C.loss).join(',');
     const g = computeGeom();
     geomRef.current = g;
     // What this frame drew, for the automated chart check (scripts/check-chart.mjs).
@@ -615,7 +637,7 @@ export function Chart(props: Props) {
     // ---- Candles (past) ----
     const pxPerHour = pxPerDay / 24;
     // Wide enough candles to read at any zoom: up to a week each when zoomed right out.
-    const bucketH = [1, 2, 4, 6, 12, 24, 48, 96, 168].find((b) => b * pxPerHour >= 5) ?? 168;
+    const bucketH = [1 / 60, 5 / 60, 15 / 60, 0.5, 1, 2, 4, 6, 12, 24, 48, 96, 168].find((b) => b * pxPerHour >= 5) ?? 168;
     const bucket = bucketH * HOUR;
     const tLeft = xToT(0) - bucket;
     ctx.save();
@@ -643,9 +665,11 @@ export function Chart(props: Props) {
       ctx.fillRect(x - bodyW / 2, y1, bodyW, bh);
       if (up && bodyW > 2) ctx.strokeRect(x - bodyW / 2 + 0.5, y1 + 0.5, bodyW - 1, Math.max(0, bh - 1));
     };
+    const lastI = candles.length - 1;
     for (let i = i0; i < candles.length; i++) {
-      const cd = candles[i];
-      const own = i + 1 < candles.length ? candles[i + 1].t - cd.t : HOUR;
+      // The forming candle follows the gliding price.
+      const cd = i === lastI ? { ...candles[i], c: shownSpot, h: Math.max(candles[i].h, shownSpot), l: Math.min(candles[i].l, shownSpot) } : candles[i];
+      const own = i < lastI ? candles[i + 1].t - cd.t : i > 0 ? cd.t - candles[i - 1].t : HOUR;
       const span = Math.max(bucket, own);
       const b = Math.floor(cd.t / span) * span;
       if (!agg || b >= agg.t + agg.span || own > agg.span) {
@@ -666,21 +690,23 @@ export function Chart(props: Props) {
     ctx.moveTo(Math.round(nowX) + 0.5, plotT);
     ctx.lineTo(Math.round(nowX) + 0.5, plotB);
     ctx.stroke();
-    const sy = Math.round(pToY(spot)) + 0.5;
+    const sy = Math.round(pToY(shownSpot) * 2) / 2;
     ctx.setLineDash([2, 3]);
-    ctx.strokeStyle = 'rgba(227,231,238,0.45)';
+    ctx.strokeStyle = flash ? `rgba(${flashRgb},${0.45 + 0.4 * flash})` : 'rgba(227,231,238,0.45)';
     ctx.beginPath();
     ctx.moveTo(0, sy);
     ctx.lineTo(plotR + PW, sy);
     ctx.stroke();
     ctx.setLineDash([]);
+    // A pulse on its own clock (live data only ticks every few seconds), tinted by the last move.
+    const pulse = REDUCED_MOTION ? 0 : (frameT / 1600) % 1;
+    ctx.fillStyle = flash ? `rgba(${flashRgb},${0.3 * (1 - pulse)})` : `rgba(227,231,238,${0.22 * (1 - pulse)})`;
+    ctx.beginPath();
+    ctx.arc(nowX, sy, 3.5 + 9 * pulse, 0, Math.PI * 2);
+    ctx.fill();
     ctx.fillStyle = C.spot;
     ctx.beginPath();
     ctx.arc(nowX, sy, 3.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = 'rgba(227,231,238,0.15)';
-    ctx.beginPath();
-    ctx.arc(nowX, sy, 3.5 + 4 * ((now / 1000) % 1), 0, Math.PI * 2);
     ctx.fill();
     ctx.font = `600 10px ${MONO}`;
     ctx.fillStyle = C.muted;
@@ -1442,6 +1468,17 @@ export function Chart(props: Props) {
         ctx.stroke();
         ctx.lineWidth = 1;
         // Label the part that's on screen, so a box cut by an edge still shows its price.
+        // A box whose price just changed lights up briefly.
+        const fk = `${b.expiry}|${b.lo}|${b.hi}`;
+        const seen = boxFlashRef.current.get(fk);
+        if (!seen) boxFlashRef.current.set(fk, { preview: b.q.preview, t: -Infinity });
+        else if (Math.abs(seen.preview - b.q.preview) > 1e-6) boxFlashRef.current.set(fk, { preview: b.q.preview, t: frameT });
+        const bf = REDUCED_MOTION ? 0 : Math.max(0, 1 - (frameT - (boxFlashRef.current.get(fk)?.t ?? -Infinity)) / 900);
+        if (bf > 0) {
+          roundRect(ctx, x0, y0, x1 - x0, y1 - y0, 4);
+          ctx.fillStyle = `rgba(227,231,238,${0.16 * bf})`;
+          ctx.fill();
+        }
         const vx0 = Math.max(x0, nowX);
         const vx1 = Math.min(x1, plotR);
         const vy0 = Math.max(y0, plotT);
@@ -1552,11 +1589,16 @@ export function Chart(props: Props) {
 
     // Spot tag on the axis.
     ctx.font = `600 11px ${MONO}`;
-    const sLabel = fmtPrice(spot, narrow ? Math.max(0, spec.priceDecimals - 2) : spec.priceDecimals);
+    const sLabel = fmtPrice(shownSpot, narrow ? Math.max(0, spec.priceDecimals - 2) : spec.priceDecimals);
     roundRect(ctx, plotR + PW + 2, sy - 9, AW - 4, 18, 3);
     ctx.fillStyle = C.text;
     ctx.fill();
-    ctx.fillStyle = C.bg;
+    // Up or down tick: the label flashes green or red, fading back.
+    if (flash) {
+      ctx.fillStyle = `rgba(${flashRgb},${0.9 * flash})`;
+      ctx.fill();
+    }
+    ctx.fillStyle = flash > 0.5 ? '#0c0f14' : C.bg;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(sLabel, plotR + PW + 7, sy + 0.5);
@@ -1701,18 +1743,18 @@ export function Chart(props: Props) {
     draw();
   });
 
-  // Pulse the spot dot.
+  // Keep the chart moving: the price glide, the pulse and box highlights (about 30 frames a second).
   useEffect(() => {
     let raf = 0;
     let last = 0;
     const loop = (ts: number) => {
-      if (ts - last > 60) {
+      if (ts - last > 30) {
         last = ts;
         draw();
       }
       raf = requestAnimationFrame(loop);
     };
-    if (!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) raf = requestAnimationFrame(loop);
+    if (!REDUCED_MOTION) raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
   }, [draw]);
 
@@ -1752,7 +1794,7 @@ export function Chart(props: Props) {
       const f = Math.exp(d * 0.0012);
       const z = zoomRef.current ?? { horizon: view.horizon, yZoom: view.yZoom, raf: 0, cur: view, sent: [] };
       if (e.shiftKey || (g && x > g.plotR)) z.yZoom = Math.min(4, Math.max(0.15, z.yZoom * f));
-      else z.horizon = Math.min(MAX_HORIZON, Math.max(1.5 * DAY, z.horizon * f));
+      else z.horizon = Math.min(MAX_HORIZON, Math.max(MIN_HORIZON, z.horizon * f));
       if (!zoomRef.current) {
         zoomRef.current = z;
         z.raf = requestAnimationFrame(step);
@@ -1842,7 +1884,7 @@ export function Chart(props: Props) {
         const { view, onViewChange } = propsRef.current;
         const next = { ...view };
         // Only an axis the fingers are actually spread along gets zoomed.
-        if (pinch.dx > 40) next.horizon = Math.min(MAX_HORIZON, Math.max(1.5 * DAY, pinch.horizon * (pinch.dx / Math.max(dx, 20))));
+        if (pinch.dx > 40) next.horizon = Math.min(MAX_HORIZON, Math.max(MIN_HORIZON, pinch.horizon * (pinch.dx / Math.max(dx, 20))));
         if (pinch.dy > 40) next.yZoom = Math.min(4, Math.max(0.15, pinch.yZoom * (pinch.dy / Math.max(dy, 20))));
         lastMoveRef.current = performance.now();
         onViewChange(next);

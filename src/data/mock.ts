@@ -4,6 +4,7 @@ import type { OptType } from '../lib/bs';
 import {
   HOUR,
   MARKETS,
+  MINUTE,
   YEAR,
   gaussian,
   generateHistory,
@@ -57,8 +58,9 @@ function mockMarket(asset: Asset, now: number): Market & { tick(t: number): void
     tick(t) {
       spot *= Math.exp(spec.baseIv * 1.4 * Math.sqrt(1000 / YEAR) * gaussian());
       const last = candles[candles.length - 1];
-      const hour = Math.floor(t / HOUR) * HOUR;
-      if (hour > last.t) candles.push({ t: hour, o: last.c, h: Math.max(last.c, spot), l: Math.min(last.c, spot), c: spot });
+      // Live ticks build 1-minute candles after the hourly history.
+      const minute = Math.floor(t / MINUTE) * MINUTE;
+      if (minute > last.t) candles.push({ t: minute, o: last.c, h: Math.max(last.c, spot), l: Math.min(last.c, spot), c: spot });
       else {
         last.c = spot;
         last.h = Math.max(last.h, spot);
