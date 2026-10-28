@@ -183,7 +183,7 @@ for (const [asset, horizon, colFrac, chance, stake, pan = 0] of cases) {
     });
     // The payout multiple at this amount, fees included, on the card and on the box.
     await page.waitForTimeout(100);
-    const shownMult = (await page.textContent('.bet-price .num')).trim();
+    const shownMult = (await page.textContent('.bet-mult')).trim();
     const boxMult = await page.evaluate((k) => { window.__chart.draw(); return window.__chart.easyBoxes.find((x) => x.expiry === k.expiry && x.lo === k.lo && x.hi === k.hi)?.label; }, pick);
     const before = await page.$$eval('.bet-list li', (l) => l.length);
     await page.click('.bet-card .primary');

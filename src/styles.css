@@ -420,11 +420,7 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .bet-meter div { height: 100%; border-radius: 3px; background: var(--text); opacity: 0.85; }
 .bet-card.above .bet-meter div { background: var(--profit); }
 .bet-card.below .bet-meter div { background: var(--loss); }
-.bet-price { display: flex; align-items: baseline; gap: 10px; }
-.bet-price .num { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
-.bet-card.above .bet-price .num { color: var(--profit); }
-.bet-card.below .bet-price .num { color: var(--loss); }
-.bet-price span:last-child { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.bet-mult { color: var(--text); font-weight: 700; }
 @media (max-width: 380px) { .bet-hero { grid-template-columns: 1fr; } }
 .bet-stake { display: grid; gap: 6px; }
 .bet-stake > span { font-size: 12px; color: var(--muted); }
@@ -433,9 +429,6 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .stake-input input { flex: 1; min-width: 0; border: 0; background: none; font: 600 18px var(--mono); outline: none; }
 .stake-quick { display: flex; gap: 6px; }
 .stake-quick .ghost { flex: 1; }
-.bet-sum { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
-.bet-sum dt { font-size: 11px; color: var(--muted); }
-.bet-sum dd { margin: 2px 0 0; font-weight: 600; }
 .bets { display: grid; gap: 8px; }
 .bet-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .bet-list li { border: 1px solid var(--line-2); border-left-width: 3px; border-radius: 8px; padding: 9px 11px; display: grid; gap: 4px; }

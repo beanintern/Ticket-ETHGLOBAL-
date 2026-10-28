@@ -125,7 +125,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
     ? betLegs(pending, shares).map((l, i) => ({ instrument: instrumentName(l), buy: l.side > 0, amount: fmtQty(l.qty), price: pending.previewLegPrices[i] }))
     : [];
   const u0Text = pending
-    ? `Each contract is on 1 ${pending.asset}. The two strikes are $${fmtStrike(pending.hi - pending.lo)} apart, so ${underlying[0]?.amount ?? '–'} contracts pay up to $${shares.toFixed(2)}: $1 for each of your ${shares.toFixed(1)} shares.`
+    ? `Each contract is on 1 ${pending.asset}. The two strikes are $${fmtStrike(pending.hi - pending.lo)} apart, so ${underlying[0]?.amount ?? '–'} contracts pay up to $${shares.toFixed(2)}.`
     : '';
   // On narrow screens the card sits below the chart: bring it into view when a bet is picked.
   const cardRef = useRef<HTMLDivElement>(null);
@@ -206,7 +206,15 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 <span className="num bet-win-amount" style={{ fontSize: shares >= 1e5 ? 26 : shares >= 1e4 ? 30 : undefined }}>
                   {blocked ? '–' : usd(shares, shares >= 100 ? 0 : 2)}
                 </span>
-                <span className="bet-hero-sub">{blocked ? `for a $${stake} bet` : `${signedUsd(shares - size!.cost)} profit or more`}</span>
+                <span className="bet-hero-sub">
+                  {blocked ? (
+                    `for a $${stake} bet`
+                  ) : (
+                    <>
+                      <b className="num bet-mult">{fmtMultiple(payoutMultiple(pending, stake, spot))}</b> · {signedUsd(shares - size!.cost)} profit or more
+                    </>
+                  )}
+                </span>
               </div>
               <div className="bet-chance">
                 <span className="bet-hero-label">Chance</span>
@@ -215,10 +223,6 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                   <div style={{ width: `${Math.max(2, Math.min(100, pending.price * 100))}%` }} />
                 </div>
               </div>
-            </div>
-            <div className="bet-price">
-              <span className="num">{fmtMultiple(payoutMultiple(pending, stake, spot))}</span>
-              <span>your money back if right, at least, with Derive's fees included</span>
             </div>
             <label className="bet-stake">
               <span>Amount</span>
@@ -242,23 +246,6 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 {minBet > MIN_BET ? ": Derive's smallest order (0.1 contracts) plus its fee." : ', so the $0.50 Derive fee stays a small part of it.'}
               </p>
             ) : null}
-            {size && !tooSmall && !pending.unavailable && size.fees > size.cost * 0.1 && (
-              <p className="fine">Derive's fees are up to {Math.round((size.fees / size.cost) * 100)}% of this bet: a $0.50 base fee plus up to 12.5% of the options' price.</p>
-            )}
-            <dl className="bet-sum">
-              <div>
-                <dt>Shares</dt>
-                <dd className="num">{blocked ? '–' : shares.toFixed(1)}</dd>
-              </div>
-              <div>
-                <dt>Derive fees</dt>
-                <dd className="num">{blocked ? '–' : `≤ ${usd(size!.fees, 2)}`}</dd>
-              </div>
-              <div>
-                <dt>Cost</dt>
-                <dd className="num">{blocked ? '–' : `≤ ${usd(size!.cost, 2)}`}</dd>
-              </div>
-            </dl>
             {live ? (
               <div className="bet-live">
                 {live.trading.canTrade === false && <p className="form-error">This session key can't trade: reconnect to create a trading key.</p>}
@@ -273,7 +260,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 {buy.kind === 'worse' ? (
                   <>
                     <p className="form-error">
-                      The best quote is {usd(buy.total, 2)} for {shares.toFixed(1)} shares (pays {fmtMultiple(shares / buy.total)}), above the{' '}
+                      The best quote is {usd(buy.total, 2)} (pays {fmtMultiple(shares / buy.total)}), above the{' '}
                       {usd(size?.cost ?? 0, 2)} shown.
                     </p>
                     <button className="primary" onClick={() => void fillBuy(buy.quote)}>
@@ -359,13 +346,13 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 <p className="fine">{u0Text}</p>
               </div>
             )}
-            <p className="fine">
-              {(() => {
-                const [win, lose] = pending.dir === 'above' ? [pending.hi, pending.lo] : [pending.lo, pending.hi];
-                const [winWord, loseWord] = pending.dir === 'above' ? ['above', 'below'] : ['below', 'above'];
-                return `Pays $1 per share if ${asset} settles ${winWord} $${fmtStrike(win)} on ${expiryLabel(pending.expiry)}, nothing ${loseWord} $${fmtStrike(lose)}, and part-way in between. Built from a ${pending.lo}/${pending.hi} ${pending.dir === 'above' ? 'call' : 'put'} spread; you can sell any time before. ${live ? `On ${live.trading.info.name}${live.trading.info.real ? ' with real USDC' : ''}: market makers quote both options as one package, which fills whole or not at all.` : 'Paper trade, at the price shown.'}`;
-              })()}
-            </p>
+            {/* Fees: already in every number above, and what they are. */}
+            {size && !blocked && (
+              <p className="fine bet-fees">
+                Fees included: up to {usd(size.fees, 2)} of the {usd(size.cost, 2)} goes to Derive ({Math.round((size.fees / size.cost) * 100)}%), a $0.50 fee per bet
+                plus up to 12.5% of the options' price. The amounts shown assume the most you could pay, so you'll usually get a little more.
+              </p>
+            )}
           </div>
         )}
 
