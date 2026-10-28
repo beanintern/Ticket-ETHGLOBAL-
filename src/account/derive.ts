@@ -123,7 +123,17 @@ export interface RfqFill {
   filled: number;
   fee: number;
   error: string | null;
+  /** Derive didn't say whether it traded (a timeout or a dropped connection): it may have. */
+  uncertain?: boolean;
 }
+
+/** Errors after which an order may or may not have gone through: a timeout or a dropped connection. */
+const UNCERTAIN = /\b9000\b|time ?out|timed out|connection|closed|network|socket/i;
+/** After an uncertain execution: how often, and how many times, to look for its trades. */
+const CONFIRM_POLL_MS = 2000;
+const CONFIRM_TRIES = 5;
+/** Shown when Derive never said whether an order traded. */
+const UNCERTAIN_TEXT = 'Derive didn’t confirm whether this traded. It may still have gone through: check your positions before trying again.';
 
 /** How long to collect maker quotes for: the first one, then a little longer for a better one. */
 const RFQ_WAIT_MS = 7000;
@@ -444,7 +454,8 @@ export class DeriveAccount {
         const filled = num(res.order.filled_amount);
         results.push({ order: o, ok: true, status: String(res.order.order_status), filled, averagePrice: num(res.order.average_price), error: null });
       } catch (e) {
-        results.push({ order: o, ok: false, status: 'rejected', filled: 0, averagePrice: 0, error: explainError(e, this.net) });
+        const unsure = UNCERTAIN.test(e instanceof Error ? e.message : String(e));
+        results.push({ order: o, ok: false, status: unsure ? 'unconfirmed' : 'rejected', filled: 0, averagePrice: 0, error: unsure ? UNCERTAIN_TEXT : explainError(e, this.net) });
         break;
       }
     }
@@ -512,6 +523,7 @@ export class DeriveAccount {
   async rfqExecute(q: RfqQuote): Promise<RfqFill> {
     const subaccountId = this.state.subaccountId;
     if (subaccountId === null) throw new Error('No subaccount');
+    const startedAt = Date.now();
     try {
       const res = await this.sdk.rfq.executeQuote({ subaccountId, quote: q.quote as never, maxFee: q.maxFee, label: 'ticket' });
       // A fraction of the package (1 = all of it); read a percentage the same way.
@@ -519,10 +531,30 @@ export class DeriveAccount {
       const filled = raw > 1 ? raw / 100 : raw;
       return { ok: filled > 0, filled, fee: num(res.fee), error: filled > 0 ? null : `Not filled (${res.status})` };
     } catch (e) {
+      // A timeout doesn't mean it didn't trade: look for the trade before saying anything.
+      if (UNCERTAIN.test(e instanceof Error ? e.message : String(e))) return this.rfqFillFromHistory(q, subaccountId, startedAt);
       return { ok: false, filled: 0, fee: 0, error: explainError(e, this.net) };
     } finally {
       void this.refresh();
     }
+  }
+
+  /** What an RFQ execution Derive didn't confirm actually did, from the subaccount's trades. */
+  private async rfqFillFromHistory(q: RfqQuote, subaccountId: number, since: number): Promise<RfqFill> {
+    const leg = q.quote.legs[0];
+    for (let i = 0; i < CONFIRM_TRIES; i++) {
+      await new Promise((r) => setTimeout(r, CONFIRM_POLL_MS));
+      try {
+        const res = await this.sdk.send('private/get_trade_history', { subaccount_id: subaccountId, from_timestamp: since - 60_000, page_size: 100 });
+        const trades = res.trades.filter((t) => t.rfq_id === q.rfqId);
+        if (!trades.length) continue;
+        const filled = Math.min(1, trades.filter((t) => t.instrument_name === leg.instrument_name).reduce((a, t) => a + num(t.trade_amount), 0) / num(leg.amount));
+        return { ok: filled > 0, filled, fee: trades.reduce((a, t) => a + num(t.trade_fee), 0), error: null };
+      } catch {
+        /* try again */
+      }
+    }
+    return { ok: false, filled: 0, fee: 0, error: UNCERTAIN_TEXT, uncertain: true };
   }
 
   async rfqCancel(rfqId: string) {

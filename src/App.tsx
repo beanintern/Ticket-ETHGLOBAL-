@@ -645,7 +645,7 @@ export default function App() {
     const sent = results.filter((r) => r.ok).length;
     if (rejected) {
       setToast(
-        `${what}: ${rejected.order.instrument} rejected: ${rejected.error}${sent ? ` (${sent} earlier order${sent > 1 ? 's' : ''} went through)` : ''}`,
+        `${what}: ${rejected.order.instrument} ${rejected.status === 'unconfirmed' ? 'unconfirmed' : 'rejected'}: ${rejected.error}${sent ? ` (${sent} earlier order${sent > 1 ? 's' : ''} went through)` : ''}`,
       );
     } else {
       setToast(`${what}: ${sent} order${sent > 1 ? 's' : ''} sent, ${filled} filled${filled < sent ? '; the rest are open or cancelled (see Positions)' : ''}`);

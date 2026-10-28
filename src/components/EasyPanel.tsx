@@ -95,7 +95,8 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
     if (fill.ok) {
       setBuy({ kind: 'idle' });
       live.onBoughtLive(pending, quote, fill);
-    } else setBuy({ kind: 'error', message: `Couldn’t fill that quote: ${fill.error ?? 'rejected'}. Try again for a fresh one.` });
+    } else if (fill.uncertain) setBuy({ kind: 'error', message: fill.error! });
+    else setBuy({ kind: 'error', message: `Couldn’t fill that quote: ${fill.error ?? 'rejected'}. Try again for a fresh one.` });
   };
 
   const startBuy = async () => {
@@ -148,7 +149,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
     if (fill.ok) {
       setSell(pos.id, { kind: 'idle' });
       live.onSoldLive(pos.id, quote, fill);
-    } else setSell(pos.id, { kind: 'error', message: `Couldn’t fill: ${fill.error ?? 'rejected'}` });
+    } else setSell(pos.id, { kind: 'error', message: fill.uncertain ? fill.error! : `Couldn’t fill: ${fill.error ?? 'rejected'}` });
   };
   const startSell = async (pos: Position) => {
     if (!pos.venue) return onSellPaper(pos.id);
