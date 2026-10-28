@@ -505,3 +505,23 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .mode-art.pro { position: relative; background: linear-gradient(180deg, rgba(46,201,139,0.35), rgba(46,201,139,0.06) 48%, rgba(239,90,85,0.06) 52%, rgba(239,90,85,0.35)); }
 .mode-art.pro span { position: absolute; left: 0; right: 0; top: 50%; border-top: 1.5px solid rgba(227,231,238,0.8); transform: rotate(-8deg); }
 @media (max-width: 480px) { .mode-options { grid-template-columns: 1fr; } .mode-art { height: 76px; } }
+
+/* Hero modal: the picked box grows into the trade dialog; the page behind shrinks and frosts. */
+.app { transform-origin: 50% 50%; }
+.hero { position: fixed; inset: 0; z-index: 60; }
+.hero.is-closing { pointer-events: none; }
+.hero-back {
+  position: absolute; inset: 0; opacity: 0;
+  background: rgba(6, 8, 12, 0.35);
+}
+.hero-surface { position: fixed; pointer-events: none; border: 1px solid; box-shadow: 0 24px 70px rgba(0,0,0,0.55); }
+.hero-surface.above { background: #14231e; border-color: rgba(46,201,139,0.55); }
+.hero-surface.below { background: #26171a; border-color: rgba(239,90,85,0.55); }
+.hero-panel {
+  position: absolute; left: 50%; top: 50%; translate: -50% -50%;
+  width: min(420px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow-y: auto;
+  border-radius: 14px; opacity: 0; outline: none;
+}
+.hero-panel .bet-card { background: var(--panel); box-shadow: 0 24px 70px rgba(0,0,0,0.5); }
+/* Behind an open modal the page is frozen and blurred: no flashes to re-blur every frame. */
+.hero-open .app .tick-up, .hero-open .app .tick-down { animation: none; }

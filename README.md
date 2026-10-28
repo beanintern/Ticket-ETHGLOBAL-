@@ -205,6 +205,10 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
   fee on each leg). The card ("If ETH is above $2,925", dated above) leads with the profit if right (fees included, at least), with the payout
   multiple and what comes back, next to the chance of winning; Derive's fees are spelled out at
   the bottom; **Show underlying positions** lists the two options at the preview's leg prices.
+  Picking a box opens the trade dialog with a spring-driven hero transition (`HeroModal`): a
+  surface in the box's colour flies from the box to the dialog while the page behind shrinks a
+  little and frosts (blurred and dimmed, frozen while covered); closing flies it back. Reduced
+  motion skips the flight.
   Placed bets are outlined on their box with what went in and what they're worth now.
   With a Derive account connected, **Your bets** come from the account itself (`src/lib/bets.ts`):
   every subaccount's option positions are read (`private/get_all_portfolios`) and each bought

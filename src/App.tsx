@@ -275,7 +275,7 @@ export default function App() {
     }
   }, []);
   const easy = mode === 'easy';
-  const [pick, setPick] = useState<{ asset: Asset; expiry: number; lo: number; hi: number } | null>(null);
+  const [pick, setPick] = useState<{ asset: Asset; expiry: number; lo: number; hi: number; rect?: { x: number; y: number; w: number; h: number } } | null>(null);
   const [stake, setStake] = useState(20);
   // Positions ticked in the Positions tab: their legs are added to the chart's P&L map (with the
   // ticket being built), so their exposure compounds.
@@ -497,7 +497,7 @@ export default function App() {
         quote: (expiry: number, lo: number, hi: number) => quoteBet(market, asset, expiry, lo, now, { lo, hi }),
         multiple: (q: BetQuote) => payoutMultiple(q, stake, market.spot),
         stake,
-        onPick: (expiry: number, lo: number, hi: number) => setPick({ asset, expiry, lo, hi }),
+        onPick: (expiry: number, lo: number, hi: number, rect: { x: number; y: number; w: number; h: number }) => setPick({ asset, expiry, lo, hi, rect }),
         pending: pendingBet,
         bets: bets
           .filter((b) => b.asset === asset && b.bet!.expiry > now)
@@ -1091,6 +1091,7 @@ export default function App() {
             onCancel={() => setPick(null)}
             onBuy={buyBet}
             bets={bets}
+            pickedAt={pick?.rect ?? null}
             otherLegs={fromAccount?.otherLegs ?? 0}
             onSellPaper={sellBetPaper}
             sellBlocked={sellBlocked}

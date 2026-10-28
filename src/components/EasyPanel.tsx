@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RfqFill, RfqQuote } from '../account/derive';
 import type { Trading } from './DeriveReview';
+import { HeroModal, type Rect } from './HeroModal';
 import { betLegs, betQuestion, fmtChance, fmtMultiple, payoutMultiple, MIN_BET, minStake, previewBid, rfqFee, sharePayoff, sizeBet, type BetQuote } from '../lib/binary';
 import { instrumentName } from '../account/orders';
 import { compactUsd, fmtQty, fmtStrike, signedUsd, usd } from '../lib/format';
@@ -22,6 +23,8 @@ interface Props {
   /** Paper bet at the preview price. */
   onBuy: (q: BetQuote, stake: number) => void;
   bets: Position[];
+  /** Where the picked box is on screen: the trade dialog grows out of it. */
+  pickedAt?: Rect | null;
   /** Contracts in the Derive account that aren't part of a bet (shown in Pro). */
   otherLegs?: number;
   /** Paper sale at the estimate the Sell button shows. */
@@ -61,7 +64,7 @@ type Flow =
   | { kind: 'filling' }
   | { kind: 'error'; message: string };
 
-export function EasyPanel({ asset, now, markets, pending, stake, onStake: setStake, onCancel, onBuy, bets, otherLegs = 0, onSellPaper, sellBlocked, venue }: Props) {
+export function EasyPanel({ asset, now, markets, pending, stake, onStake: setStake, onCancel, onBuy, bets, pickedAt = null, otherLegs = 0, onSellPaper, sellBlocked, venue }: Props) {
   const spot = pending ? markets[pending.asset].spot : 0;
   // What the stake buys at the preview price, Derive's fees included, on Derive's size grid.
   const size = pending ? sizeBet(pending, stake, spot) : null;
@@ -127,12 +130,6 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
   const u0Text = pending
     ? `Each contract is on 1 ${pending.asset}. The two strikes are $${fmtStrike(pending.hi - pending.lo)} apart, so ${underlying[0]?.amount ?? '–'} contracts pay up to $${shares.toFixed(2)}.`
     : '';
-  // On narrow screens the card sits below the chart: bring it into view when a bet is picked.
-  const cardRef = useRef<HTMLDivElement>(null);
-  const pickKey = pending ? `${pending.expiry}|${pending.level}` : '';
-  useEffect(() => {
-    if (pickKey && window.innerWidth <= 960) cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [pickKey]);
 
   // Selling, per bet.
   const [sells, setSells] = useState<Record<string, Flow>>({});
@@ -175,7 +172,176 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
   return (
     <aside className="sidebar easy" aria-label="Predict">
       <div className="panel-body">
-        {!pending ? (
+        {/* The trade dialog grows out of the picked box (HeroModal); the intro stays behind it. */}
+        <HeroModal open={!!pending} origin={pickedAt} tone={pending?.dir ?? 'above'} onClose={onCancel} label="Trade">
+          {pending && (
+            <div className={`bet-card ${pending.dir}`}>
+              <div className="bet-head">
+                <div className="eyebrow">{expiryLabel(pending.expiry)} · 08:00 UTC</div>
+                <button className="ghost" onClick={onCancel} aria-label="Cancel">
+                  ✕
+                </button>
+              </div>
+              <h2>
+                If {asset} is {pending.dir} ${fmtStrike(pending.level)}
+              </h2>
+              {/* What matters most first: what you'd get, and how likely that is. */}
+              <div className="bet-hero">
+                <div className="bet-win">
+                  <span className="bet-hero-label">You profit</span>
+                  <span className={`num bet-win-amount ${!blocked && shares < size!.cost ? 'down' : ''}`} style={{ fontSize: shares >= 1e5 ? 26 : shares >= 1e4 ? 30 : undefined }}>
+                    {blocked ? '–' : usd(shares - size!.cost, shares - size!.cost >= 100 ? 0 : 2)}
+                  </span>
+                  <span className="bet-hero-sub">
+                    {blocked ? (
+                      `for $${stake}`
+                    ) : (
+                      <>
+                        or more · <b className="num bet-mult">{fmtMultiple(payoutMultiple(pending, stake, spot))}</b> · {usd(shares, 2)} back if right
+                      </>
+                    )}
+                  </span>
+                </div>
+                <div className="bet-chance">
+                  <span className="bet-hero-label">Chance</span>
+                  <span className="num bet-chance-pct">{fmtChance(pending.price)}</span>
+                  <div className="bet-meter" role="meter" aria-label="Chance of winning" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pending.price * 100)}>
+                    <div style={{ width: `${Math.max(2, Math.min(100, pending.price * 100))}%` }} />
+                  </div>
+                </div>
+              </div>
+              <label className="bet-stake">
+                <span>Amount</span>
+                <div className="stake-input">
+                  <span>$</span>
+                  <input type="number" min={minBet} step={1} value={stake} onChange={(e) => setStake(Math.max(0, Number(e.target.value) || 0))} />
+                </div>
+                <div className="stake-quick">
+                  {[10, 50, 100].map((v) => (
+                    <button key={v} className="ghost" onClick={() => setStake(v)}>
+                      ${v}
+                    </button>
+                  ))}
+                </div>
+              </label>
+              {pending.unavailable ? (
+                <p className="form-error">{pending.unavailable}. Pick another box.</p>
+              ) : tooSmall ? (
+                <p className="form-error">
+                  The minimum here is {usd(minBet, 0)}
+                  {minBet > MIN_BET ? ": Derive's smallest order (0.1 contracts) plus its fee." : ', so the $0.50 Derive fee stays a small part of it.'}
+                </p>
+              ) : null}
+              {live ? (
+                <div className="bet-live">
+                  {live.trading.canTrade === false && <p className="form-error">This session key can't trade: reconnect to create a trading key.</p>}
+                  {buy.kind === 'confirm' && (
+                    <p className="real-note">
+                      Real money: spends up to {usd(size?.cost ?? 0, 2)} USDC from your Derive account. Market makers quote a firm price; it buys at once if that's at
+                      or under this, and asks you if it's more. Click again to get quotes.
+                    </p>
+                  )}
+                  {buy.kind === 'none' && <p className="form-error">No market maker quoted this just now. Try again in a moment, or pick another box.</p>}
+                  {buy.kind === 'error' && <p className="form-error">{buy.message}</p>}
+                  {buy.kind === 'worse' ? (
+                    <>
+                      <p className="form-error">
+                        The best quote is {usd(buy.total, 2)} (pays {fmtMultiple(shares / buy.total)}), above the{' '}
+                        {usd(size?.cost ?? 0, 2)} shown.
+                      </p>
+                      <button className="primary" onClick={() => void fillBuy(buy.quote)}>
+                        Buy at {usd(buy.total, 2)}
+                      </button>
+                      <button
+                        className="link"
+                        onClick={() => {
+                          void live.trading.rfqCancel(buy.quote);
+                          worseRef.current = null;
+                          setBuy({ kind: 'idle' });
+                        }}
+                      >
+                        Don't buy
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      className={`primary ${buy.kind === 'confirm' ? 'is-confirm' : ''}`}
+                      disabled={blocked || busy || live.trading.canTrade === false}
+                      onClick={() => void startBuy()}
+                    >
+                      {buy.kind === 'quoting'
+                        ? 'Getting quotes…'
+                        : buy.kind === 'filling'
+                          ? 'Buying…'
+                          : buy.kind === 'confirm'
+                            ? `Confirm: buy for up to ${usd(size?.cost ?? 0, 2)} USDC`
+                            : `Buy on ${live.trading.info.name} · up to ${size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}`}
+                    </button>
+                  )}
+                  <button className="link" disabled={blocked || busy} onClick={() => onBuy(pending, stake)}>
+                    Paper trade instead
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <button className="primary" disabled={blocked} onClick={() => onBuy(pending, stake)}>
+                    Buy · {size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}
+                    {venue.kind === 'connect' ? ' (paper)' : ''}
+                  </button>
+                  {venue.kind === 'connect' && venue.missingGroup ? (
+                    <>
+                      <p className="fine">
+                        {asset} options trade in Derive's {venue.missingGroup} margin group, and your account has no subaccount there yet. Deposit USDC into one to
+                        trade {asset} for real.
+                      </p>
+                      <button className="link" onClick={venue.onConnect}>
+                        Set up {asset} trading
+                      </button>
+                    </>
+                  ) : (
+                    venue.kind === 'connect' && (
+                      <button className="link" onClick={venue.onConnect}>
+                        Connect your {venue.info.name} account to trade for real ({venue.info.real ? 'USDC' : 'test funds'})
+                      </button>
+                    )
+                  )}
+                </>
+              )}
+              <button className={`ghost underlying-btn ${showLegs ? 'is-on' : ''}`} onClick={() => setShowLegs((v) => !v)} aria-expanded={showLegs}>
+                {showLegs ? 'Hide' : 'Show'} underlying positions
+              </button>
+              {showLegs && (
+                <div className="underlying">
+                  <p className="fine">
+                    This position is a {pending.dir === 'above' ? 'call' : 'put'} spread on Derive, bought as one package by RFQ. Prices are the preview's: at most this
+                    for the option bought, at least this for the one sold.
+                  </p>
+                  <table>
+                    <tbody>
+                      {underlying.map((u) => (
+                        <tr key={u.instrument}>
+                          <td className={u.buy ? 'long' : 'short'}>{u.buy ? 'Buy' : 'Sell'}</td>
+                          <td className="num">
+                            {u.amount} × {u.instrument}
+                          </td>
+                          <td className="num">{compactUsd(u.price)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="fine">{u0Text}</p>
+                </div>
+              )}
+              {/* Fees: already in every number above, and what they are. */}
+              {size && !blocked && (
+                <p className="fine bet-fees">
+                  Fees included: up to {usd(size.fees, 2)} of the {usd(size.cost, 2)} goes to Derive ({Math.round((size.fees / size.cost) * 100)}%), a $0.50 fee per trade
+                  plus up to 12.5% of the options' price. The amounts shown assume the most you could pay, so you'll usually get a little more.
+                </p>
+              )}
+            </div>
+          )}
+        </HeroModal>
           <div className="easy-intro">
             <div className="eyebrow">Predict {asset}</div>
             <h2>Where will {asset} be?</h2>
@@ -188,173 +354,6 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               under a 25% chance. When you buy, market makers quote a firm price, usually better. Further away and sooner pays more. Positions start at $10.
             </p>
           </div>
-        ) : (
-          <div className={`bet-card ${pending.dir}`} ref={cardRef}>
-            <div className="bet-head">
-              <div className="eyebrow">{expiryLabel(pending.expiry)} · 08:00 UTC</div>
-              <button className="ghost" onClick={onCancel} aria-label="Cancel">
-                ✕
-              </button>
-            </div>
-            <h2>
-              If {asset} is {pending.dir} ${fmtStrike(pending.level)}
-            </h2>
-            {/* What matters most first: what you'd get, and how likely that is. */}
-            <div className="bet-hero">
-              <div className="bet-win">
-                <span className="bet-hero-label">You profit</span>
-                <span className={`num bet-win-amount ${!blocked && shares < size!.cost ? 'down' : ''}`} style={{ fontSize: shares >= 1e5 ? 26 : shares >= 1e4 ? 30 : undefined }}>
-                  {blocked ? '–' : usd(shares - size!.cost, shares - size!.cost >= 100 ? 0 : 2)}
-                </span>
-                <span className="bet-hero-sub">
-                  {blocked ? (
-                    `for $${stake}`
-                  ) : (
-                    <>
-                      or more · <b className="num bet-mult">{fmtMultiple(payoutMultiple(pending, stake, spot))}</b> · {usd(shares, 2)} back if right
-                    </>
-                  )}
-                </span>
-              </div>
-              <div className="bet-chance">
-                <span className="bet-hero-label">Chance</span>
-                <span className="num bet-chance-pct">{fmtChance(pending.price)}</span>
-                <div className="bet-meter" role="meter" aria-label="Chance of winning" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pending.price * 100)}>
-                  <div style={{ width: `${Math.max(2, Math.min(100, pending.price * 100))}%` }} />
-                </div>
-              </div>
-            </div>
-            <label className="bet-stake">
-              <span>Amount</span>
-              <div className="stake-input">
-                <span>$</span>
-                <input type="number" min={minBet} step={1} value={stake} onChange={(e) => setStake(Math.max(0, Number(e.target.value) || 0))} />
-              </div>
-              <div className="stake-quick">
-                {[10, 50, 100].map((v) => (
-                  <button key={v} className="ghost" onClick={() => setStake(v)}>
-                    ${v}
-                  </button>
-                ))}
-              </div>
-            </label>
-            {pending.unavailable ? (
-              <p className="form-error">{pending.unavailable}. Pick another box.</p>
-            ) : tooSmall ? (
-              <p className="form-error">
-                The minimum here is {usd(minBet, 0)}
-                {minBet > MIN_BET ? ": Derive's smallest order (0.1 contracts) plus its fee." : ', so the $0.50 Derive fee stays a small part of it.'}
-              </p>
-            ) : null}
-            {live ? (
-              <div className="bet-live">
-                {live.trading.canTrade === false && <p className="form-error">This session key can't trade: reconnect to create a trading key.</p>}
-                {buy.kind === 'confirm' && (
-                  <p className="real-note">
-                    Real money: spends up to {usd(size?.cost ?? 0, 2)} USDC from your Derive account. Market makers quote a firm price; it buys at once if that's at
-                    or under this, and asks you if it's more. Click again to get quotes.
-                  </p>
-                )}
-                {buy.kind === 'none' && <p className="form-error">No market maker quoted this just now. Try again in a moment, or pick another box.</p>}
-                {buy.kind === 'error' && <p className="form-error">{buy.message}</p>}
-                {buy.kind === 'worse' ? (
-                  <>
-                    <p className="form-error">
-                      The best quote is {usd(buy.total, 2)} (pays {fmtMultiple(shares / buy.total)}), above the{' '}
-                      {usd(size?.cost ?? 0, 2)} shown.
-                    </p>
-                    <button className="primary" onClick={() => void fillBuy(buy.quote)}>
-                      Buy at {usd(buy.total, 2)}
-                    </button>
-                    <button
-                      className="link"
-                      onClick={() => {
-                        void live.trading.rfqCancel(buy.quote);
-                        worseRef.current = null;
-                        setBuy({ kind: 'idle' });
-                      }}
-                    >
-                      Don't buy
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    className={`primary ${buy.kind === 'confirm' ? 'is-confirm' : ''}`}
-                    disabled={blocked || busy || live.trading.canTrade === false}
-                    onClick={() => void startBuy()}
-                  >
-                    {buy.kind === 'quoting'
-                      ? 'Getting quotes…'
-                      : buy.kind === 'filling'
-                        ? 'Buying…'
-                        : buy.kind === 'confirm'
-                          ? `Confirm: buy for up to ${usd(size?.cost ?? 0, 2)} USDC`
-                          : `Buy on ${live.trading.info.name} · up to ${size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}`}
-                  </button>
-                )}
-                <button className="link" disabled={blocked || busy} onClick={() => onBuy(pending, stake)}>
-                  Paper trade instead
-                </button>
-              </div>
-            ) : (
-              <>
-                <button className="primary" disabled={blocked} onClick={() => onBuy(pending, stake)}>
-                  Buy · {size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}
-                  {venue.kind === 'connect' ? ' (paper)' : ''}
-                </button>
-                {venue.kind === 'connect' && venue.missingGroup ? (
-                  <>
-                    <p className="fine">
-                      {asset} options trade in Derive's {venue.missingGroup} margin group, and your account has no subaccount there yet. Deposit USDC into one to
-                      trade {asset} for real.
-                    </p>
-                    <button className="link" onClick={venue.onConnect}>
-                      Set up {asset} trading
-                    </button>
-                  </>
-                ) : (
-                  venue.kind === 'connect' && (
-                    <button className="link" onClick={venue.onConnect}>
-                      Connect your {venue.info.name} account to trade for real ({venue.info.real ? 'USDC' : 'test funds'})
-                    </button>
-                  )
-                )}
-              </>
-            )}
-            <button className={`ghost underlying-btn ${showLegs ? 'is-on' : ''}`} onClick={() => setShowLegs((v) => !v)} aria-expanded={showLegs}>
-              {showLegs ? 'Hide' : 'Show'} underlying positions
-            </button>
-            {showLegs && (
-              <div className="underlying">
-                <p className="fine">
-                  This position is a {pending.dir === 'above' ? 'call' : 'put'} spread on Derive, bought as one package by RFQ. Prices are the preview's: at most this
-                  for the option bought, at least this for the one sold.
-                </p>
-                <table>
-                  <tbody>
-                    {underlying.map((u) => (
-                      <tr key={u.instrument}>
-                        <td className={u.buy ? 'long' : 'short'}>{u.buy ? 'Buy' : 'Sell'}</td>
-                        <td className="num">
-                          {u.amount} × {u.instrument}
-                        </td>
-                        <td className="num">{compactUsd(u.price)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <p className="fine">{u0Text}</p>
-              </div>
-            )}
-            {/* Fees: already in every number above, and what they are. */}
-            {size && !blocked && (
-              <p className="fine bet-fees">
-                Fees included: up to {usd(size.fees, 2)} of the {usd(size.cost, 2)} goes to Derive ({Math.round((size.fees / size.cost) * 100)}%), a $0.50 fee per trade
-                plus up to 12.5% of the options' price. The amounts shown assume the most you could pay, so you'll usually get a little more.
-              </p>
-            )}
-          </div>
-        )}
 
         <section className="bets">
           <div className="section-head">

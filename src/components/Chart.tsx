@@ -73,7 +73,8 @@ export interface EasyLayer {
   multiple: (q: BetQuote) => number | null;
   /** The amount being bet: a new amount changes every multiple, which isn't a price move to flash. */
   stake: number;
-  onPick: (expiry: number, lo: number, hi: number) => void;
+  /** A box was picked; `rect` is where it is on screen (the trade dialog grows out of it). */
+  onPick: (expiry: number, lo: number, hi: number, rect: { x: number; y: number; w: number; h: number }) => void;
   /** The bet being set up (its box is filled in). */
   pending: BetQuote | null;
   /** Placed bets, drawn as outlined boxes with their price now. */
@@ -135,6 +136,8 @@ const easeOut = (f: number) => 1 - (1 - f) ** 3;
 type Tick = { from: number; to: number; t0: number; flashT0: number; dir: 0 | 1 | -1; asset: string };
 const glidePrice = (tk: Tick, t: number) => (REDUCED_MOTION ? tk.to : tk.from + (tk.to - tk.from) * easeOut(Math.min(1, Math.max(0, (t - tk.t0) / TICK_MS))));
 const CELL = 4;
+/** While a modal covers the page (blurred behind it), the chart stops redrawing: no one can see it. */
+const behindModal = () => document.documentElement.classList.contains('hero-open');
 /** Coarser P&L map while the view is moving, refined once it settles. */
 const CELL_MOVING = 8;
 const MONO = '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -1826,7 +1829,7 @@ export function Chart(props: Props) {
   }, [draw]);
 
   useEffect(() => {
-    draw();
+    if (!behindModal()) draw();
   });
 
   // Keep the chart moving: the price glide, the pulse and box highlights (about 30 frames a second).
@@ -1834,7 +1837,7 @@ export function Chart(props: Props) {
     let raf = 0;
     let last = 0;
     const loop = (ts: number) => {
-      if (ts - last > 30) {
+      if (ts - last > 30 && !behindModal()) {
         last = ts;
         draw();
       }
@@ -2069,7 +2072,12 @@ export function Chart(props: Props) {
     const p = propsRef.current;
     if (p.easy) {
       const b = easyGridRef.current?.boxes.find((bx) => x > bx.x0 && x <= bx.x1 && y <= g.pToY(bx.lo) && y > g.pToY(bx.hi));
-      if (b && !b.q.unavailable) p.easy.onPick(b.expiry, b.lo, b.hi);
+      if (b && !b.q.unavailable) {
+        const c = canvasRef.current!.getBoundingClientRect();
+        const y0 = Math.max(g.plotT, g.pToY(b.hi));
+        const y1 = Math.min(g.plotB, g.pToY(b.lo));
+        p.easy.onPick(b.expiry, b.lo, b.hi, { x: c.left + b.x0 + 1.5, y: c.top + y0 + 1.5, w: b.x1 - b.x0 - 3, h: y1 - y0 - 3 });
+      }
       return;
     }
     if (!isLegTool(p.tool)) {
