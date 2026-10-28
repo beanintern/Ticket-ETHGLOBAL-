@@ -7,9 +7,9 @@ import type { Trading } from './components/DeriveReview';
 import { AccountButton, AccountPanel } from './components/AccountPanel';
 import { Chart, TOOL_LEG, type ChartView, type LegTool, type Tool } from './components/Chart';
 import { fitPath, payoffAlongPath, type PathPoint } from './lib/pathfit';
-import { betLegs, betQuestion, fmtMultiple, minStake, quoteBet, sizeBet, type BetQuote } from './lib/binary';
+import { betLegs, betQuestion, fmtMultiple, minStake, payoutMultiple, quoteBet, sizeBet, type BetQuote } from './lib/binary';
 import { betsFromHeld } from './lib/bets';
-import { EasyPanel, sellEstimate, sharePrice } from './components/EasyPanel';
+import { EasyPanel, sellEstimate } from './components/EasyPanel';
 import { AssetPicker } from './components/AssetPicker';
 import { TickFlash } from './components/TickFlash';
 import { Sidebar } from './components/Sidebar';
@@ -470,25 +470,28 @@ export default function App() {
     };
     setPositions((ps) => [pos, ...ps]);
     setPick(null);
-    setToast(`Bought: pays ${usd(shares, 2)} if right (${fmtMultiple((premium + fees) / shares)} with fees): ${pos.name} (paper)`);
+    setToast(`Bought: pays ${usd(shares, 2)} if right (${fmtMultiple(shares / (premium + fees))} with fees): ${pos.name} (paper)`);
   };
   const easyLayer = easy
     ? {
         quote: (expiry: number, lo: number, hi: number) => quoteBet(market, asset, expiry, lo, now, { lo, hi }),
+        multiple: (q: BetQuote) => payoutMultiple(q, stake, market.spot),
+        stake,
         onPick: (expiry: number, lo: number, hi: number) => setPick({ asset, expiry, lo, hi }),
         pending: pendingBet,
         bets: bets
           .filter((b) => b.asset === asset && b.bet!.expiry > now)
           .map((b) => {
-            const px = sharePrice(b, markets, now);
+            // Worth now: what selling would fetch at least, after fees.
+            const worth = sellEstimate(b, markets, now).proceeds;
             return {
               id: b.id,
               expiry: b.bet!.expiry,
               lo: b.bet!.lo,
               hi: b.bet!.hi,
               dir: b.bet!.dir,
-              label: `$${(b.bet!.entry * b.bet!.shares).toFixed(0)} → $${(px * b.bet!.shares).toFixed(0)}`,
-              up: px > b.bet!.entry,
+              label: `$${(b.bet!.entry * b.bet!.shares).toFixed(0)} → $${worth.toFixed(0)}`,
+              up: worth > b.bet!.entry * b.bet!.shares,
             };
           }),
       }
@@ -727,7 +730,7 @@ export default function App() {
     setPositions((ps) => [pos, ...ps]);
     setPick(null);
     setToast(
-      `Bought: pays ${usd(shares, 2)} if right (${fmtMultiple(paid / shares)} with fees) on ${trading.info.name}: ${pos.name}${fill.filled < 1 ? ` (${Math.round(fill.filled * 100)}% filled)` : ''}`,
+      `Bought: pays ${usd(shares, 2)} if right (${fmtMultiple(shares / paid)} with fees) on ${trading.info.name}: ${pos.name}${fill.filled < 1 ? ` (${Math.round(fill.filled * 100)}% filled)` : ''}`,
     );
   };
 

@@ -179,12 +179,19 @@ export function minStake(q: BetQuote, spot: number): number {
 }
 
 /**
- * What a bet pays back if right, as a multiple of what goes in, for a share price p (it pays $1):
- * "6.2×", "25×". Rounded down, so it's what you get at least.
+ * What betting `stake` here pays back if right, as a multiple of the stake, with Derive's fees
+ * included: at the preview price and the high fee estimate, so a filled bet pays at least this.
+ * Under the box's minimum bet, the minimum's. Null if it can't be bet on.
  */
-export function fmtMultiple(p: number): string {
-  if (!(p > 0)) return '–';
-  const m = 1 / p;
+export function payoutMultiple(q: BetQuote, stake: number, spot: number): number | null {
+  if (q.unavailable) return null;
+  const s = sizeBet(q, Math.max(stake, minStake(q, spot)), spot);
+  return s && s.cost > 0 ? s.shares / s.cost : null;
+}
+
+/** A payout multiple, rounded down so it's what you get at least: "6.2×", "25×". */
+export function fmtMultiple(m: number | null): string {
+  if (m === null || !(m > 0) || !Number.isFinite(m)) return '–';
   return m >= 10 ? `${Math.floor(m)}×` : `${(Math.floor(m * 10) / 10).toFixed(1)}×`;
 }
 

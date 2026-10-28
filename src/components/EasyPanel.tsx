@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RfqFill, RfqQuote } from '../account/derive';
 import type { Trading } from './DeriveReview';
-import { betLegs, betQuestion, fmtChance, fmtMultiple, MIN_BET, minStake, previewBid, rfqFee, sharePayoff, sizeBet, type BetQuote } from '../lib/binary';
+import { betLegs, betQuestion, fmtChance, fmtMultiple, payoutMultiple, MIN_BET, minStake, previewBid, rfqFee, sharePayoff, sizeBet, type BetQuote } from '../lib/binary';
 import { instrumentName } from '../account/orders';
 import { compactUsd, fmtQty, fmtStrike, signedUsd, usd } from '../lib/format';
 import { expiryLabel, type Asset } from '../lib/market';
@@ -39,12 +39,6 @@ interface Props {
         onBoughtLive: (q: BetQuote, quote: RfqQuote, fill: RfqFill) => void;
         onSoldLive: (pos: Position, quote: RfqQuote, fill: RfqFill) => void;
       };
-}
-
-/** Current fair price of one share of a bet: the legs' value at mark, per share. */
-export function sharePrice(pos: Position, markets: Record<Asset, Market>, now: number): number {
-  const m = buildModel(pos.legs, markets[pos.asset], now);
-  return pos.bet ? Math.min(1, Math.max(0, m.value / pos.bet.shares)) : 0;
 }
 
 /** What selling a bet is expected to fetch at least by RFQ, after estimated fees: what Sell shows. */
@@ -173,7 +167,8 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
 
   const open = bets.filter((b) => b.bet && b.bet.expiry > now);
   const settled = bets.filter((b) => b.bet && b.bet.expiry <= now);
-  const value = open.reduce((a, b) => a + sharePrice(b, markets, now) * b.bet!.shares, 0);
+  // Worth now: what selling would fetch at least, after fees, not the mid price.
+  const value = open.reduce((a, b) => a + sellEstimate(b, markets, now).proceeds, 0);
   const cost = open.reduce((a, b) => a + b.bet!.entry * b.bet!.shares, 0);
   const busy = buy.kind === 'quoting' || buy.kind === 'filling';
 
@@ -189,8 +184,8 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               on that box's date.
             </p>
             <p className="fine">
-              Each box shows what a bet pays back if you're right, at least: <b>4×</b> means about a 25% chance, and $10 comes back as about $40
-              (less Derive's fees). When you buy, market makers quote a firm price, usually lower. Further away and sooner is cheaper. Bets start at $10.
+              Each box shows what a bet pays back if you're right, at least, with Derive's fees included: <b>4×</b> means $10 comes back as at least $40, a bit
+              under a 25% chance. When you buy, market makers quote a firm price, usually better. Further away and sooner pays more. Bets start at $10.
             </p>
           </div>
         ) : (
@@ -223,8 +218,8 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               </div>
             </div>
             <div className="bet-price">
-              <span className="num">{fmtMultiple(pending.preview)}</span>
-              <span>your money back if right, at least (fair {fmtMultiple(pending.price)}), before Derive's fees</span>
+              <span className="num">{fmtMultiple(payoutMultiple(pending, stake, spot))}</span>
+              <span>your money back if right, at least, with Derive's fees included</span>
             </div>
             <label className="bet-stake">
               <span>Amount</span>
@@ -279,7 +274,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 {buy.kind === 'worse' ? (
                   <>
                     <p className="form-error">
-                      The best quote is {usd(buy.total, 2)} for {shares.toFixed(1)} shares (pays {fmtMultiple(buy.total / shares)}), above the{' '}
+                      The best quote is {usd(buy.total, 2)} for {shares.toFixed(1)} shares (pays {fmtMultiple(shares / buy.total)}), above the{' '}
                       {usd(size?.cost ?? 0, 2)} shown.
                     </p>
                     <button className="primary" onClick={() => void fillBuy(buy.quote)}>
@@ -390,9 +385,10 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             {[...open, ...settled].map((b) => {
               const bet = b.bet!;
               const done = bet.expiry <= now;
-              const px = done ? sharePayoff(bet, markets[b.asset].spot) : sharePrice(b, markets, now);
-              const pnl = (px - bet.entry) * bet.shares;
               const est = done ? null : sellEstimate(b, markets, now);
+              // Settled: what it paid. Open: what selling now would fetch at least, after fees.
+              const worth = done ? sharePayoff(bet, markets[b.asset].spot) * bet.shares : est!.proceeds;
+              const pnl = worth - bet.entry * bet.shares;
               const flow = sells[b.id] ?? { kind: 'idle' };
               return (
                 <li key={b.id} className={bet.dir}>
@@ -405,7 +401,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                   </div>
                   <div className="bet-row fine">
                     <span className="num">
-                      {usd(bet.entry * bet.shares)} in · {done ? 'settled' : 'now'} {usd(px * bet.shares)} · wins {usd(bet.shares)}
+                      {usd(bet.entry * bet.shares)} in · {done ? 'settled' : 'now'} {usd(worth)} · wins {usd(bet.shares)}
                     </span>
                     {est &&
                       (flow.kind === 'worse' ? (
@@ -443,7 +439,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                   {flow.kind === 'none' && <p className="fine">No market maker bid for it just now. Try again in a moment.</p>}
                   {flow.kind === 'error' && <p className="form-error">{flow.message}</p>}
                   <div className="bet-bar" aria-hidden="true">
-                    <div style={{ width: `${Math.round(px * 100)}%` }} />
+                    <div style={{ width: `${Math.round(Math.min(1, worth / bet.shares) * 100)}%` }} />
                   </div>
                 </li>
               );

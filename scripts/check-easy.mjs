@@ -11,7 +11,8 @@
 //      an independent Black-Scholes value of the spread per $1, and its preview (the price shown)
 //      the RFQ markup on the spread, max($0.10, 1.5% × √(spread price × index)), on top: never below fair;
 //      only boxes under 0.2¢ fair or over 99¢ preview are unavailable, and those can't be clicked
-//   3. betting on a box: the card shows its preview, "Show underlying positions" lists the two
+//   3. betting on a box: the card and the box show the payout multiple at the amount bet, fees
+//      included (what it pays if right over what it costs, rounded down), "Show underlying positions" lists the two
 //      options (right expiry, strikes and sides), a bet under the minimum can't be placed, a paper
 //      bet fills at the preview's leg prices and costs at most $X with RFQ fees (sizes on Derive's
 //      0.01-contract grid, at least 0.1), and the shares' legs pay exactly $1 past the far strike,
@@ -160,12 +161,6 @@ for (const [asset, horizon, colFrac, chance, stake, pan = 0] of cases) {
     await page.mouse.click(canvas.x + (pick.x0 + pick.x1) / 2, canvas.y + (pick.y0 + pick.y1) / 2);
     await page.waitForSelector('.bet-card');
     // 3. Card, underlying positions, purchase.
-    const shown = (await page.textContent('.bet-price .num')).trim();
-    const c = pick.preview * 100;
-    // Shown as a payout multiple ($1 a share over the preview price), rounded down.
-    const m = 100 / c;
-    const want = m >= 10 ? `${Math.floor(m)}×` : `${(Math.floor(m * 10) / 10).toFixed(1)}×`;
-    if (shown !== want) fail(`card shows ${shown}, box is ${want}`);
     // Under the minimum: can't buy.
     await page.fill('.stake-input input', '5');
     await page.waitForTimeout(50);
@@ -186,6 +181,10 @@ for (const [asset, horizon, colFrac, chance, stake, pan = 0] of cases) {
       const name = `${asset}-${ymd}-${String(k).replace('.', '_')}-${t}`;
       if (!rows[i].startsWith(side) || !rows[i].includes(name)) fail(`underlying row ${i + 1} "${rows[i]}", expected ${side} ${name}`);
     });
+    // The payout multiple at this amount, fees included, on the card and on the box.
+    await page.waitForTimeout(100);
+    const shownMult = (await page.textContent('.bet-price .num')).trim();
+    const boxMult = await page.evaluate((k) => { window.__chart.draw(); return window.__chart.easyBoxes.find((x) => x.expiry === k.expiry && x.lo === k.lo && x.hi === k.hi)?.label; }, pick);
     const before = await page.$$eval('.bet-list li', (l) => l.length);
     await page.click('.bet-card .primary');
     await page.waitForTimeout(250);
@@ -217,6 +216,13 @@ for (const [asset, horizon, colFrac, chance, stake, pan = 0] of cases) {
     const step = ((premium + fees - 0.5) / qty) * rules.amountStep;
     if (paid > bet + 1e-6 || paid < bet - step - 0.01) fail(`bet costs $${paid.toFixed(2)} (incl. $${fees.toFixed(2)} fees) for a $${bet} stake`);
     if (Math.abs(b.entry * b.shares - paid) > 1e-6) fail(`recorded $${(b.entry * b.shares).toFixed(2)} in, cost $${paid.toFixed(2)}`);
+    // What it pays back if right over what it cost, fees included, rounded down; never above the
+    // fee-free multiple; the same on the card and the box.
+    const mult = b.shares / paid;
+    const wantMult = mult >= 10 ? `${Math.floor(mult)}×` : `${(Math.floor(mult * 10) / 10).toFixed(1)}×`;
+    if (shownMult !== wantMult) fail(`card shows ${shownMult}, but $${b.shares.toFixed(2)} back on $${paid.toFixed(2)} paid is ${wantMult}`);
+    if (boxMult !== shownMult) fail(`box shows ${boxMult}, card ${shownMult}`);
+    if (mult > 1 / pick.preview + 1e-9) fail(`multiple ${mult.toFixed(3)} with fees is above the fee-free ${(1 / pick.preview).toFixed(3)}`);
     // 4. Listed, then sold.
     const listed = await page.$$eval('.bet-list li', (l) => l.length);
     if (listed !== before + 1) fail(`bet list has ${listed} rows, expected ${before + 1}`);

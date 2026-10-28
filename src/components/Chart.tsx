@@ -69,6 +69,10 @@ interface Props {
 export interface EasyLayer {
   /** The bet for one box: a listed expiry and a band of listed strikes. */
   quote: (expiry: number, lo: number, hi: number) => BetQuote | null;
+  /** What a box's bet pays back if right at the amount being bet, fees included (see payoutMultiple). */
+  multiple: (q: BetQuote) => number | null;
+  /** The amount being bet, for the tooltip. */
+  stake: number;
   onPick: (expiry: number, lo: number, hi: number) => void;
   /** The bet being set up (its box is filled in). */
   pending: BetQuote | null;
@@ -1553,7 +1557,7 @@ export function Chart(props: Props) {
         if (vy1 - vy0 >= 12 && vx1 - vx0 >= 30) {
           ctx.font = `${sel || hov ? 700 : 600} ${vy1 - vy0 >= 18 ? 10.5 : 9.5}px ${MONO}`;
           ctx.fillStyle = sel ? '#0c0f14' : hov ? C.text : `rgba(${rgb},${0.45 + 0.55 * heat})`;
-          ctx.fillText(fmtMultiple(b.q.preview), (vx0 + vx1) / 2, (vy0 + vy1) / 2 + 0.5);
+          ctx.fillText(fmtMultiple(easy.multiple(b.q)), (vx0 + vx1) / 2, (vy0 + vy1) / 2 + 0.5);
         }
       }
       // Placed bets: an outline on their box, with the price paid and now.
@@ -1706,7 +1710,7 @@ export function Chart(props: Props) {
           lines.push({ text: `${betQuestion(spec.asset, q.dir, q.level)} on ${fmtTime(q.expiry, false)}`, bold: true, color: q.unavailable ? C.muted : col });
           if (q.unavailable) lines.push({ text: q.unavailable, color: C.muted });
           else {
-            lines.push({ text: `Pays ${fmtMultiple(q.preview)} or more · ${fmtChance(q.price)} chance`, bold: true });
+            lines.push({ text: `Pays ${fmtMultiple(p.easy!.multiple(q))} or more on $${p.easy!.stake}, fees included · ${fmtChance(q.price)} chance`, bold: true });
             lines.push({ text: 'Click to bet · firm price when you buy', color: C.muted });
           }
         }
@@ -1775,7 +1779,7 @@ export function Chart(props: Props) {
         markers: markers.map((m) => ({ id: m.id, x: m.x + m.w / 2, y: m.y + m.h / 2 })),
         guide: p.guide,
         easyHover: easyInfo ? { ...easyInfo.q } : null,
-        easyBoxes: p.easy ? (easyGridRef.current?.boxes ?? []).map((b) => ({ expiry: b.expiry, lo: b.lo, hi: b.hi, x0: b.x0, x1: b.x1, y0: g.pToY(b.hi), y1: g.pToY(b.lo), price: b.q.price, preview: b.q.preview, dir: b.q.dir, unavailable: b.q.unavailable })) : null,
+        easyBoxes: p.easy ? (easyGridRef.current?.boxes ?? []).map((b) => ({ label: fmtMultiple(p.easy!.multiple(b.q)), expiry: b.expiry, lo: b.lo, hi: b.hi, x0: b.x0, x1: b.x1, y0: g.pToY(b.hi), y1: g.pToY(b.lo), price: b.q.price, preview: b.q.preview, dir: b.q.dir, unavailable: b.q.unavailable })) : null,
         heat: heat && maxAbs > 1e-9 ? { x0: heat.x0, cell: heat.cell, cols: heat.cols, rows: heat.rows, contour: heat.contour } : null,
         pnl: pnlFn,
         draw,
