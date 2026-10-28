@@ -205,13 +205,27 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             <h2>
               Will {asset} be {pending.dir} ${fmtStrike(pending.level)} on {expiryLabel(pending.expiry)}?
             </h2>
+            {/* What matters most first: what you'd get, and how likely that is. */}
+            <div className="bet-hero">
+              <div className="bet-win">
+                <span className="bet-hero-label">If right, you get</span>
+                <span className="num bet-win-amount" style={{ fontSize: shares >= 1e5 ? 26 : shares >= 1e4 ? 30 : undefined }}>
+                  {blocked ? '–' : usd(shares, shares >= 100 ? 0 : 2)}
+                </span>
+                <span className="bet-hero-sub">{blocked ? `for a $${stake} bet` : `${signedUsd(shares - size!.cost)} profit or more`}</span>
+              </div>
+              <div className="bet-chance">
+                <span className="bet-hero-label">Chance</span>
+                <span className="num bet-chance-pct">{fmtChance(pending.price)}</span>
+                <div className="bet-meter" role="meter" aria-label="Chance of winning" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pending.price * 100)}>
+                  <div style={{ width: `${Math.max(2, Math.min(100, pending.price * 100))}%` }} />
+                </div>
+                <span className="bet-hero-sub">the market's odds</span>
+              </div>
+            </div>
             <div className="bet-price">
               <span className="num">{cents(pending.preview)}</span>
-              <span>
-                a share at most · fair {cents(pending.price)}, a {fmtChance(pending.price)} chance
-                <br />
-                each share pays $1 if right
-              </span>
+              <span>a share at most (fair {cents(pending.price)}); each share pays $1 if right</span>
             </div>
             <label className="bet-stake">
               <span>Amount</span>
@@ -248,12 +262,8 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 <dd className="num">{blocked ? '–' : `≤ ${usd(size!.fees, 2)}`}</dd>
               </div>
               <div>
-                <dt>If Yes, you get</dt>
-                <dd className="num up">{blocked ? '–' : usd(shares, 2)}</dd>
-              </div>
-              <div>
-                <dt>Profit if right</dt>
-                <dd className="num up">{blocked ? '–' : `≥ ${signedUsd(shares - size!.cost)}`}</dd>
+                <dt>Cost</dt>
+                <dd className="num">{blocked ? '–' : `≤ ${usd(size!.cost, 2)}`}</dd>
               </div>
             </dl>
             {live ? (
