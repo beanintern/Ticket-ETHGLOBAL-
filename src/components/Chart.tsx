@@ -1711,7 +1711,7 @@ export function Chart(props: Props) {
           if (q.unavailable) lines.push({ text: q.unavailable, color: C.muted });
           else {
             lines.push({ text: `Pays ${fmtMultiple(p.easy!.multiple(q))} or more on $${p.easy!.stake}, fees included · ${fmtChance(q.price)} chance`, bold: true });
-            lines.push({ text: 'Click to bet · firm price when you buy', color: C.muted });
+            lines.push({ text: 'Click to buy', color: C.muted });
           }
         }
         if (!easyInfo) lines.push({ text: `${fmtTime(ht, true)} UTC · ${fmtPrice(hp, Math.max(pDec, spec.priceDecimals))}`, color: C.muted });
