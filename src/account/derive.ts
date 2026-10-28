@@ -335,6 +335,8 @@ export class DeriveAccount {
     }
     try {
       const s = await this.client.subaccounts.get(id);
+      // Switched subaccount while this was loading: its snapshot belongs to the old one.
+      if (this.state.subaccountId !== id) return;
       const positions: AccountPosition[] = [];
       const otherPositions: Portfolio['otherPositions'] = [];
       for (const p of s.positions) {
