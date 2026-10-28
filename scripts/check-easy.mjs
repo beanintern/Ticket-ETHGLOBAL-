@@ -166,7 +166,7 @@ for (const [asset, horizon, colFrac, chance, stake, pan = 0] of cases) {
     await page.waitForTimeout(50);
     if (!(await page.isDisabled('.bet-card .primary'))) fail('a $5 bet (under the minimum) can be placed');
     const minText = (await page.textContent('.bet-card .form-error')) ?? '';
-    const min = Number(/minimum bet here is \$([\d,]+)/.exec(minText)?.[1].replace(/,/g, ''));
+    const min = Number(/minimum here is \$([\d,]+)/.exec(minText)?.[1].replace(/,/g, ''));
     if (!(min >= 10)) fail(`no minimum shown for a $5 bet ("${minText}")`);
     const bet = Math.max(stake, min);
     await page.fill('.stake-input input', String(bet));

@@ -453,7 +453,7 @@ export default function App() {
     // Sized as it would be on Derive: fees included, contracts on its 0.01 grid, at least its minimum.
     const size = q.unavailable || amount < minStake(q, markets[q.asset].spot) ? null : sizeBet(q, amount, markets[q.asset].spot);
     if (!size) {
-      setToast(q.unavailable ?? `The minimum bet here is $${minStake(q, markets[q.asset].spot)}.`);
+      setToast(q.unavailable ?? `The minimum here is $${minStake(q, markets[q.asset].spot)}.`);
       return;
     }
     const { shares, fees, premium, cost } = size;
@@ -738,7 +738,7 @@ export default function App() {
     if (!pos.venue) return null;
     const where = pos.venue === 'derive-mainnet' ? NETS.mainnet : NETS.testnet;
     if (trading && account?.net === where.net) return null;
-    return `This bet is on ${where.name}: ${net === where.net ? 'connect your account' : `switch to ${where.real ? 'Live' : 'Testnet'} and connect`} to sell it.`;
+    return `This position is on ${where.name}: ${net === where.net ? 'connect your account' : `switch to ${where.real ? 'Live' : 'Testnet'} and connect`} to sell it.`;
   };
 
   const closeBet = (pos: Position, proceeds: number, where: string) => {
@@ -891,7 +891,7 @@ export default function App() {
           <div className="chart-toolbar">
             {easy ? (
               <div className="easy-hint">
-                <span className="up">▲ Tap above the price</span> to bet it ends higher · <span className="down">▼ below</span> to bet lower
+                <span className="up">▲ Tap above the price</span> to buy if it ends higher · <span className="down">▼ below</span> if it ends lower
               </div>
             ) : (
             <>

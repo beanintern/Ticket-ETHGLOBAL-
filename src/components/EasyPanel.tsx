@@ -149,7 +149,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
   const startSell = async (pos: Position) => {
     if (!pos.venue) return onSellPaper(pos.id);
     const why = sellBlocked(pos);
-    if (why || !live) return setSell(pos.id, { kind: 'error', message: why ?? 'Connect your account to sell this bet.' });
+    if (why || !live) return setSell(pos.id, { kind: 'error', message: why ?? 'Connect your account to sell this position.' });
     const flow = sells[pos.id]?.kind ?? 'idle';
     if (live.trading.info.real && flow !== 'confirm') return setSell(pos.id, { kind: 'confirm' });
     setSell(pos.id, { kind: 'quoting' });
@@ -180,12 +180,12 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             <div className="eyebrow">Predict {asset}</div>
             <h2>Where will {asset} be?</h2>
             <p>
-              Tap a box <b className="up">above</b> the price to bet {asset} ends higher than it, or <b className="down">below</b> to bet it ends lower,
+              Tap a box <b className="up">above</b> the price if you think {asset} ends higher than it, or <b className="down">below</b> if lower,
               on that box's date.
             </p>
             <p className="fine">
-              Each box shows what a bet pays back if you're right, at least, with Derive's fees included: <b>4×</b> means $10 comes back as at least $40, a bit
-              under a 25% chance. When you buy, market makers quote a firm price, usually better. Further away and sooner pays more. Bets start at $10.
+              Each box shows what a position pays back if you're right, at least, with Derive's fees included: <b>4×</b> means $10 comes back as at least $40, a bit
+              under a 25% chance. When you buy, market makers quote a firm price, usually better. Further away and sooner pays more. Positions start at $10.
             </p>
           </div>
         ) : (
@@ -208,7 +208,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 </span>
                 <span className="bet-hero-sub">
                   {blocked ? (
-                    `for a $${stake} bet`
+                    `for $${stake}`
                   ) : (
                     <>
                       or more · <b className="num bet-mult">{fmtMultiple(payoutMultiple(pending, stake, spot))}</b> · {usd(shares, 2)} back if right
@@ -242,7 +242,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               <p className="form-error">{pending.unavailable}. Pick another box.</p>
             ) : tooSmall ? (
               <p className="form-error">
-                The minimum bet here is {usd(minBet, 0)}
+                The minimum here is {usd(minBet, 0)}
                 {minBet > MIN_BET ? ": Derive's smallest order (0.1 contracts) plus its fee." : ', so the $0.50 Derive fee stays a small part of it.'}
               </p>
             ) : null}
@@ -293,7 +293,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                   </button>
                 )}
                 <button className="link" disabled={blocked || busy} onClick={() => onBuy(pending, stake)}>
-                  Paper bet instead
+                  Paper trade instead
                 </button>
               </div>
             ) : (
@@ -306,7 +306,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                   <>
                     <p className="fine">
                       {asset} options trade in Derive's {venue.missingGroup} margin group, and your account has no subaccount there yet. Deposit USDC into one to
-                      bet on {asset} for real.
+                      trade {asset} for real.
                     </p>
                     <button className="link" onClick={venue.onConnect}>
                       Set up {asset} trading
@@ -315,7 +315,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 ) : (
                   venue.kind === 'connect' && (
                     <button className="link" onClick={venue.onConnect}>
-                      Connect your {venue.info.name} account to bet for real ({venue.info.real ? 'USDC' : 'test funds'})
+                      Connect your {venue.info.name} account to trade for real ({venue.info.real ? 'USDC' : 'test funds'})
                     </button>
                   )
                 )}
@@ -327,7 +327,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             {showLegs && (
               <div className="underlying">
                 <p className="fine">
-                  This bet is a {pending.dir === 'above' ? 'call' : 'put'} spread on Derive, bought as one package by RFQ. Prices are the preview's: at most this
+                  This position is a {pending.dir === 'above' ? 'call' : 'put'} spread on Derive, bought as one package by RFQ. Prices are the preview's: at most this
                   for the option bought, at least this for the one sold.
                 </p>
                 <table>
@@ -349,7 +349,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             {/* Fees: already in every number above, and what they are. */}
             {size && !blocked && (
               <p className="fine bet-fees">
-                Fees included: up to {usd(size.fees, 2)} of the {usd(size.cost, 2)} goes to Derive ({Math.round((size.fees / size.cost) * 100)}%), a $0.50 fee per bet
+                Fees included: up to {usd(size.fees, 2)} of the {usd(size.cost, 2)} goes to Derive ({Math.round((size.fees / size.cost) * 100)}%), a $0.50 fee per trade
                 plus up to 12.5% of the options' price. The amounts shown assume the most you could pay, so you'll usually get a little more.
               </p>
             )}
@@ -358,15 +358,15 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
 
         <section className="bets">
           <div className="section-head">
-            <div className="eyebrow">Your bets</div>
+            <div className="eyebrow">Your positions</div>
             {open.length > 0 && (
               <span className={`num ${pnlClass(value - cost)}`}>
                 {usd(value)} · {signedUsd(value - cost)}
               </span>
             )}
           </div>
-          {open.length === 0 && settled.length === 0 && <p className="fine">No bets yet.</p>}
-          {otherLegs > 0 && <p className="fine">Your Derive account also holds options that aren’t bets: see them in Pro.</p>}
+          {open.length === 0 && settled.length === 0 && <p className="fine">No positions yet.</p>}
+          {otherLegs > 0 && <p className="fine">Your Derive account also holds options that aren’t Easy positions: see them in Pro.</p>}
           <ul className="bet-list">
             {[...open, ...settled].map((b) => {
               const bet = b.bet!;
