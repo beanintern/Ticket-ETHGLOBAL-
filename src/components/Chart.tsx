@@ -124,7 +124,7 @@ const MAX_HORIZON = 430 * DAY;
 const MIN_HORIZON = 0.5 * DAY;
 /** The price glides to each new tick over this long, and its flash fades over FLASH_MS. */
 const TICK_MS = 900;
-const FLASH_MS = 1400;
+const FLASH_MS = 1000;
 const REDUCED_MOTION = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 const easeOut = (f: number) => 1 - (1 - f) ** 3;
 type Tick = { from: number; to: number; t0: number; dir: 0 | 1 | -1; asset: string };
@@ -661,7 +661,7 @@ export function Chart(props: Props) {
       // The candle still forming glows, a little more right after each tick.
       if (forming && !REDUCED_MOTION) {
         ctx.shadowColor = `rgba(${rgb},0.9)`;
-        ctx.shadowBlur = 6 + 12 * flash;
+        ctx.shadowBlur = 4 + 6 * flash;
       }
       ctx.strokeStyle = `rgba(${rgb},${forming ? 1 : 0.8})`;
       ctx.fillStyle = `rgba(${rgb},${forming ? 1 : 0.72})`;
@@ -720,7 +720,7 @@ export function Chart(props: Props) {
     ctx.stroke();
     const sy = Math.round(pToY(shownSpot) * 2) / 2;
     ctx.setLineDash([2, 3]);
-    ctx.strokeStyle = flash ? `rgba(${flashRgb},${0.45 + 0.4 * flash})` : 'rgba(227,231,238,0.45)';
+    ctx.strokeStyle = flash ? `rgba(${flashRgb},${0.45 + 0.25 * flash})` : 'rgba(227,231,238,0.45)';
     ctx.beginPath();
     ctx.moveTo(0, sy);
     ctx.lineTo(plotR + PW, sy);
@@ -728,9 +728,9 @@ export function Chart(props: Props) {
     ctx.setLineDash([]);
     // A pulse on its own clock (live data only ticks every few seconds), tinted by the last move.
     const pulse = REDUCED_MOTION ? 0 : (frameT / 1600) % 1;
-    ctx.fillStyle = flash ? `rgba(${flashRgb},${0.3 * (1 - pulse)})` : `rgba(227,231,238,${0.22 * (1 - pulse)})`;
+    ctx.fillStyle = flash ? `rgba(${flashRgb},${0.2 * (1 - pulse)})` : `rgba(227,231,238,${0.16 * (1 - pulse)})`;
     ctx.beginPath();
-    ctx.arc(nowX, sy, 3.5 + 9 * pulse, 0, Math.PI * 2);
+    ctx.arc(nowX, sy, 3.5 + 7 * pulse, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = C.spot;
     ctx.beginPath();
@@ -1543,7 +1543,7 @@ export function Chart(props: Props) {
         const bf = REDUCED_MOTION ? 0 : Math.max(0, 1 - (frameT - (boxFlashRef.current.get(fk)?.t ?? -Infinity)) / 900);
         if (bf > 0) {
           roundRect(ctx, x0, y0, x1 - x0, y1 - y0, 4);
-          ctx.fillStyle = `rgba(227,231,238,${0.16 * bf})`;
+          ctx.fillStyle = `rgba(227,231,238,${0.1 * bf})`;
           ctx.fill();
         }
         const vx0 = Math.max(x0, nowX);
@@ -1662,7 +1662,7 @@ export function Chart(props: Props) {
     ctx.fill();
     // Up or down tick: the label flashes green or red, fading back.
     if (flash) {
-      ctx.fillStyle = `rgba(${flashRgb},${0.9 * flash})`;
+      ctx.fillStyle = `rgba(${flashRgb},${0.55 * flash})`;
       ctx.fill();
     }
     ctx.fillStyle = flash > 0.5 ? '#0c0f14' : C.bg;
