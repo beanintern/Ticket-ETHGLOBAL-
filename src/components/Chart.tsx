@@ -71,6 +71,8 @@ export interface EasyLayer {
   quote: (expiry: number, lo: number, hi: number) => BetQuote | null;
   /** What a box's bet pays back if right at the amount being bet, fees included (see payoutMultiple). */
   multiple: (q: BetQuote) => number | null;
+  /** The amount being bet: a new amount changes every multiple, which isn't a price move to flash. */
+  stake: number;
   onPick: (expiry: number, lo: number, hi: number) => void;
   /** The bet being set up (its box is filled in). */
   pending: BetQuote | null;
@@ -129,7 +131,8 @@ const TICK_MS = 900;
 const FLASH_MS = 1000;
 const REDUCED_MOTION = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 const easeOut = (f: number) => 1 - (1 - f) ** 3;
-type Tick = { from: number; to: number; t0: number; dir: 0 | 1 | -1; asset: string };
+/** A price glide, and the flash (from flashT0) of the last tick that changed the price as shown. */
+type Tick = { from: number; to: number; t0: number; flashT0: number; dir: 0 | 1 | -1; asset: string };
 const glidePrice = (tk: Tick, t: number) => (REDUCED_MOTION ? tk.to : tk.from + (tk.to - tk.from) * easeOut(Math.min(1, Math.max(0, (t - tk.t0) / TICK_MS))));
 const CELL = 4;
 /** Coarser P&L map while the view is moving, refined once it settles. */
@@ -251,9 +254,9 @@ export function Chart(props: Props) {
   const geomRef = useRef<Geom | null>(null);
   const lastMoveRef = useRef(0);
   // The live price on screen: glides from tick to tick (see glidePrice), and remembers the last move's direction.
-  const tickRef = useRef<Tick>({ from: 0, to: 0, t0: 0, dir: 0, asset: '' });
+  const tickRef = useRef<Tick>({ from: 0, to: 0, t0: 0, flashT0: -Infinity, dir: 0, asset: '' });
   // Easy boxes whose price just changed, for a brief highlight.
-  const boxFlashRef = useRef(new Map<string, { preview: number; t: number }>());
+  const boxFlashRef = useRef(new Map<string, { shown: string; t: number }>());
   const zoomRef = useRef<{ horizon: number; yZoom: number; raf: number; cur: ChartView; sent: ChartView[] } | null>(null);
   /** Easy mode's grid of boxes, rebuilt when the view or prices change. */
   const easyGridRef = useRef<{ key: string; boxes: EasyBox[] } | null>(null);
@@ -338,15 +341,27 @@ export function Chart(props: Props) {
     const { spec, market, candles, spot, now, expiries, model, editableLegs, staticLegs, tool, selectedLegId, view } = p;
     // Live price: a new tick starts a glide from wherever the price is shown now.
     const frameT = performance.now();
-    const tk = tickRef.current;
-    if (tk.asset !== spec.asset || !tk.to) tickRef.current = { from: spot, to: spot, t0: frameT - TICK_MS, dir: 0, asset: spec.asset };
-    else if (spot !== tk.to) tickRef.current = { from: glidePrice(tk, frameT), to: spot, t0: frameT, dir: spot > tk.to ? 1 : -1, asset: spec.asset };
-    const live = tickRef.current;
-    const shownSpot = glidePrice(live, frameT);
-    const flash = REDUCED_MOTION || !live.dir ? 0 : Math.max(0, 1 - (frameT - live.t0) / FLASH_MS);
-    const flashRgb = (live.dir > 0 ? C.profit : C.loss).join(',');
     const g = computeGeom();
     geomRef.current = g;
+    // The price label's decimals (fewer on a narrow chart): only a change it shows flashes.
+    const labelDecimals = g.profileW < PROFILE_W ? Math.max(0, spec.priceDecimals - 2) : spec.priceDecimals;
+    const tk = tickRef.current;
+    if (tk.asset !== spec.asset || !tk.to) tickRef.current = { from: spot, to: spot, t0: frameT - TICK_MS, flashT0: -Infinity, dir: 0, asset: spec.asset };
+    else if (spot !== tk.to) {
+      const visible = fmtPrice(spot, labelDecimals) !== fmtPrice(tk.to, labelDecimals);
+      tickRef.current = {
+        from: glidePrice(tk, frameT),
+        to: spot,
+        t0: frameT,
+        flashT0: visible ? frameT : tk.flashT0,
+        dir: visible ? (spot > tk.to ? 1 : -1) : tk.dir,
+        asset: spec.asset,
+      };
+    }
+    const live = tickRef.current;
+    const shownSpot = glidePrice(live, frameT);
+    const flash = REDUCED_MOTION || !live.dir ? 0 : Math.max(0, 1 - (frameT - live.flashT0) / FLASH_MS);
+    const flashRgb = (live.dir > 0 ? C.profit : C.loss).join(',');
     // What this frame drew, for the automated chart check (scripts/check-chart.mjs).
     const dbg = {
       zones: [] as {
@@ -1538,10 +1553,12 @@ export function Chart(props: Props) {
         ctx.lineWidth = 1;
         // Label the part that's on screen, so a box cut by an edge still shows its price.
         // A box whose price just changed lights up briefly.
-        const fk = `${b.expiry}|${b.lo}|${b.hi}`;
+        const fk = `${b.expiry}|${b.lo}|${b.hi}|${easy.stake}`;
+        const shown = fmtMultiple(easy.multiple(b.q));
+        if (boxFlashRef.current.size > 4000) boxFlashRef.current.clear();
         const seen = boxFlashRef.current.get(fk);
-        if (!seen) boxFlashRef.current.set(fk, { preview: b.q.preview, t: -Infinity });
-        else if (Math.abs(seen.preview - b.q.preview) > 1e-6) boxFlashRef.current.set(fk, { preview: b.q.preview, t: frameT });
+        if (!seen) boxFlashRef.current.set(fk, { shown, t: -Infinity });
+        else if (seen.shown !== shown) boxFlashRef.current.set(fk, { shown, t: frameT });
         const bf = REDUCED_MOTION ? 0 : Math.max(0, 1 - (frameT - (boxFlashRef.current.get(fk)?.t ?? -Infinity)) / 900);
         if (bf > 0) {
           roundRect(ctx, x0, y0, x1 - x0, y1 - y0, 4);
