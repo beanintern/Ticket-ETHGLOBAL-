@@ -1,0 +1,23 @@
+# The offline checks, on every push and pull request: typecheck and build, then the chart and Easy
+# mode against the demo market in Chromium. (The live checks need Derive, and check:draw has a
+# known date-dependent case, so those stay manual.)
+name: checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npm run check:chart
+      - run: npm run check:easy
