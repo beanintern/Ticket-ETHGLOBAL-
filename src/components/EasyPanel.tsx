@@ -197,12 +197,12 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               </button>
             </div>
             <h2>
-              Will {asset} be {pending.dir} ${fmtStrike(pending.level)} on {expiryLabel(pending.expiry)}?
+              If {asset} is {pending.dir} ${fmtStrike(pending.level)}
             </h2>
             {/* What matters most first: what you'd get, and how likely that is. */}
             <div className="bet-hero">
               <div className="bet-win">
-                <span className="bet-hero-label">If right, you get</span>
+                <span className="bet-hero-label">You win</span>
                 <span className="num bet-win-amount" style={{ fontSize: shares >= 1e5 ? 26 : shares >= 1e4 ? 30 : undefined }}>
                   {blocked ? '–' : usd(shares, shares >= 100 ? 0 : 2)}
                 </span>
@@ -214,7 +214,6 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 <div className="bet-meter" role="meter" aria-label="Chance of winning" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pending.price * 100)}>
                   <div style={{ width: `${Math.max(2, Math.min(100, pending.price * 100))}%` }} />
                 </div>
-                <span className="bet-hero-sub">the market's odds</span>
               </div>
             </div>
             <div className="bet-price">

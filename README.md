@@ -200,7 +200,7 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
   stake is sized at the preview with fees included: contracts rounded down to Derive's 0.01 step;
   RFQ fees estimated high (Derive charges one $0.50 base fee plus, per contract, min(0.03% of the
   index, 12.5% of the price) on the dearer leg only; the estimate charges both, plus any builder
-  fee on each leg). The card leads with what you'd get if right (and the profit, at least) next to the
+  fee on each leg). The card ("If ETH is above $2,925", dated above) leads with what you win if right (and the profit, at least) next to the
   chance of winning, then the payout multiple (fees included), shares, fees and cost (at most); **Show underlying positions** lists the two options at the preview's leg prices.
   Placed bets are outlined on their box with what went in and what they're worth now.
   With a Derive account connected, **Your bets** come from the account itself (`src/lib/bets.ts`):
