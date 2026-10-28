@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { reduceMotion } from '../lib/motion';
 
 /** A rectangle on screen, in viewport pixels. */
 export interface Rect {
@@ -16,7 +17,6 @@ const DAMPING = 30;
 const BEHIND_SCALE = 0.04;
 /** And how much it blurs, in px. */
 const BEHIND_BLUR = 7;
-const REDUCED_MOTION = typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /**
  * A modal that grows out of the element that opened it (a "hero" transition): a coloured surface
@@ -113,7 +113,7 @@ export function HeroModal({
         panel.current.style.transform = `translateY(${(1 - c) * 10}px) scale(${0.985 + 0.015 * c})`;
       }
     };
-    if (REDUCED_MOTION) {
+    if (reduceMotion()) {
       s.x = s.target;
       s.v = 0;
       paint();

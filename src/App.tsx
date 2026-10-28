@@ -13,6 +13,7 @@ import { EasyPanel, sellEstimate } from './components/EasyPanel';
 import { AssetPicker } from './components/AssetPicker';
 import { TickFlash } from './components/TickFlash';
 import { ModeChooser } from './components/ModeChooser';
+import { motionPref, reduceMotion, setMotionPref, systemReducesMotion } from './lib/motion';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
 import { bsPrice } from './lib/bs';
@@ -275,6 +276,9 @@ export default function App() {
     }
   }, []);
   const easy = mode === 'easy';
+  // TEMPORARY testing switch for animations (see lib/motion.ts).
+  const motionText = () => `Motion: ${reduceMotion() ? 'off' : 'on'}${motionPref() === 'system' ? (systemReducesMotion() ? ' (device: reduce)' : ' (device)') : ' (forced)'}`;
+  const [motionLabel, setMotionLabel] = useState(motionText);
   const [pick, setPick] = useState<{ asset: Asset; expiry: number; lo: number; hi: number; rect?: { x: number; y: number; w: number; h: number } } | null>(null);
   const [stake, setStake] = useState(20);
   // Positions ticked in the Positions tab: their legs are added to the chart's P&L map (with the
@@ -890,6 +894,18 @@ export default function App() {
         {/* TEMPORARY, for testing: shows the first-visit Easy / Pro chooser again. Remove before launch. */}
         <button className="ghost replay-intro" onClick={() => setAskMode(true)} title="Show the first-visit Easy / Pro chooser again (testing)">
           Replay intro
+        </button>
+        {/* TEMPORARY, for testing: animations follow the device's reduce-motion setting; this forces them on or off. */}
+        <button
+          className="ghost replay-intro"
+          onClick={() => {
+            const next = motionPref() === 'system' ? (reduceMotion() ? 'on' : 'off') : motionPref() === 'on' ? 'off' : 'system';
+            setMotionPref(next);
+            setMotionLabel(motionText());
+          }}
+          title="Animations: follow the device, or force on / off (testing)"
+        >
+          {motionLabel}
         </button>
         <SourceSwitch source={source} />
         {net && <AccountButton info={NETS[net]} account={accountState} onOpen={() => setAccountOpen(true)} />}

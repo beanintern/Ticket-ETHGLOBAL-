@@ -12,6 +12,7 @@ import {
   type MarketSpec,
 } from '../lib/market';
 import type { Market } from '../data/types';
+import { reduceMotion } from '../lib/motion';
 import { betQuestion, fmtChance, fmtMultiple, type BetQuote } from '../lib/binary';
 import type { PathPoint } from '../lib/pathfit';
 import { buildModel, lifetimeExtremes, type Leg, type Model, type Side } from '../lib/strategy';
@@ -130,11 +131,10 @@ const MIN_HORIZON = 0.5 * DAY;
 /** The price glides to each new tick over this long, and its flash fades over FLASH_MS. */
 const TICK_MS = 900;
 const FLASH_MS = 1000;
-const REDUCED_MOTION = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 const easeOut = (f: number) => 1 - (1 - f) ** 3;
 /** A price glide, and the flash (from flashT0) of the last tick that changed the price as shown. */
 type Tick = { from: number; to: number; t0: number; flashT0: number; dir: 0 | 1 | -1; asset: string };
-const glidePrice = (tk: Tick, t: number) => (REDUCED_MOTION ? tk.to : tk.from + (tk.to - tk.from) * easeOut(Math.min(1, Math.max(0, (t - tk.t0) / TICK_MS))));
+const glidePrice = (tk: Tick, t: number) => (reduceMotion() ? tk.to : tk.from + (tk.to - tk.from) * easeOut(Math.min(1, Math.max(0, (t - tk.t0) / TICK_MS))));
 const CELL = 4;
 /** While a modal covers the page (blurred behind it), the chart stops redrawing: no one can see it. */
 const behindModal = () => document.documentElement.classList.contains('hero-open');
@@ -363,7 +363,7 @@ export function Chart(props: Props) {
     }
     const live = tickRef.current;
     const shownSpot = glidePrice(live, frameT);
-    const flash = REDUCED_MOTION || !live.dir ? 0 : Math.max(0, 1 - (frameT - live.flashT0) / FLASH_MS);
+    const flash = reduceMotion() || !live.dir ? 0 : Math.max(0, 1 - (frameT - live.flashT0) / FLASH_MS);
     const flashRgb = (live.dir > 0 ? C.profit : C.loss).join(',');
     // What this frame drew, for the automated chart check (scripts/check-chart.mjs).
     const dbg = {
@@ -679,7 +679,7 @@ export function Chart(props: Props) {
       const rgb = (cd.c >= cd.o ? C.candleUp : C.candleDown).join(',');
       ctx.save();
       // The candle still forming glows, a little more right after each tick.
-      if (forming && !REDUCED_MOTION) {
+      if (forming && !reduceMotion()) {
         ctx.shadowColor = `rgba(${rgb},0.9)`;
         ctx.shadowBlur = 4 + 6 * flash;
       }
@@ -747,7 +747,7 @@ export function Chart(props: Props) {
     ctx.stroke();
     ctx.setLineDash([]);
     // A pulse on its own clock (live data only ticks every few seconds), tinted by the last move.
-    const pulse = REDUCED_MOTION ? 0 : (frameT / 1600) % 1;
+    const pulse = reduceMotion() ? 0 : (frameT / 1600) % 1;
     ctx.fillStyle = flash ? `rgba(${flashRgb},${0.2 * (1 - pulse)})` : `rgba(227,231,238,${0.16 * (1 - pulse)})`;
     ctx.beginPath();
     ctx.arc(nowX, sy, 3.5 + 7 * pulse, 0, Math.PI * 2);
@@ -1562,7 +1562,7 @@ export function Chart(props: Props) {
         const seen = boxFlashRef.current.get(fk);
         if (!seen) boxFlashRef.current.set(fk, { shown, t: -Infinity });
         else if (seen.shown !== shown) boxFlashRef.current.set(fk, { shown, t: frameT });
-        const bf = REDUCED_MOTION ? 0 : Math.max(0, 1 - (frameT - (boxFlashRef.current.get(fk)?.t ?? -Infinity)) / 900);
+        const bf = reduceMotion() ? 0 : Math.max(0, 1 - (frameT - (boxFlashRef.current.get(fk)?.t ?? -Infinity)) / 900);
         if (bf > 0) {
           roundRect(ctx, x0, y0, x1 - x0, y1 - y0, 4);
           ctx.fillStyle = `rgba(227,231,238,${0.1 * bf})`;
@@ -1837,13 +1837,13 @@ export function Chart(props: Props) {
     let raf = 0;
     let last = 0;
     const loop = (ts: number) => {
-      if (ts - last > 30 && !behindModal()) {
+      if (ts - last > 30 && !behindModal() && !reduceMotion()) {
         last = ts;
         draw();
       }
       raf = requestAnimationFrame(loop);
     };
-    if (!REDUCED_MOTION) raf = requestAnimationFrame(loop);
+    raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
   }, [draw]);
 

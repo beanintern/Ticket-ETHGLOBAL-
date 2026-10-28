@@ -390,9 +390,7 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
   .tools .tool { font-size: 10.5px; padding: 0 3px; }
   .tools .tool:first-child, .tools .tool-draw { flex-basis: 30px; }
 }
-@media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; }
-}
+html.reduce-motion * { transition: none !important; }
 .history { display: flex; gap: 4px; margin-right: auto; }
 .tool.icon { padding: 0 8px; }
 .tool:disabled { opacity: 0.35; cursor: default; border-color: var(--line-2); color: var(--muted); }
@@ -483,7 +481,7 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 @keyframes tick-down { from { color: var(--loss); text-shadow: 0 0 6px rgba(239, 90, 85, 0.3); } }
 .tick-up { animation: tick-up 1s ease-out; }
 .tick-down { animation: tick-down 1s ease-out; }
-@media (prefers-reduced-motion: reduce) { .tick-up, .tick-down { animation: none; } }
+html.reduce-motion .tick-up, html.reduce-motion .tick-down { animation: none; }
 
 /* First-visit Easy / Pro chooser */
 .mode-chooser { width: min(560px, 100%); }
