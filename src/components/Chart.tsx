@@ -71,8 +71,6 @@ export interface EasyLayer {
   quote: (expiry: number, lo: number, hi: number) => BetQuote | null;
   /** What a box's bet pays back if right at the amount being bet, fees included (see payoutMultiple). */
   multiple: (q: BetQuote) => number | null;
-  /** The amount being bet, for the tooltip. */
-  stake: number;
   onPick: (expiry: number, lo: number, hi: number) => void;
   /** The bet being set up (its box is filled in). */
   pending: BetQuote | null;
@@ -1710,7 +1708,7 @@ export function Chart(props: Props) {
           lines.push({ text: `${betQuestion(spec.asset, q.dir, q.level)} on ${fmtTime(q.expiry, false)}`, bold: true, color: q.unavailable ? C.muted : col });
           if (q.unavailable) lines.push({ text: q.unavailable, color: C.muted });
           else {
-            lines.push({ text: `Pays ${fmtMultiple(p.easy!.multiple(q))} or more on $${p.easy!.stake}, fees included · ${fmtChance(q.price)} chance`, bold: true });
+            lines.push({ text: `Pays ${fmtMultiple(p.easy!.multiple(q))} · ${fmtChance(q.price)} chance`, bold: true });
             lines.push({ text: 'Click to buy', color: C.muted });
           }
         }

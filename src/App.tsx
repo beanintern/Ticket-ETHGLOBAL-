@@ -476,7 +476,6 @@ export default function App() {
     ? {
         quote: (expiry: number, lo: number, hi: number) => quoteBet(market, asset, expiry, lo, now, { lo, hi }),
         multiple: (q: BetQuote) => payoutMultiple(q, stake, market.spot),
-        stake,
         onPick: (expiry: number, lo: number, hi: number) => setPick({ asset, expiry, lo, hi }),
         pending: pendingBet,
         bets: bets
