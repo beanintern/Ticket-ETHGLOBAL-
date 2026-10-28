@@ -15,6 +15,15 @@ const STIFFNESS = 340;
 const DAMPING = 30;
 /** How much the page behind shrinks while the modal is up. */
 const BEHIND_SCALE = 0.04;
+/** The flying surface's colours: the box's (green above, red below) and the dialog's (--panel, --line-2). */
+const TONES = {
+  above: { bg: [20, 35, 30], border: [46, 201, 139, 0.55] },
+  below: { bg: [38, 23, 26], border: [239, 90, 85, 0.55] },
+} as const;
+const PANEL_BG = [17, 21, 28] as const;
+const PANEL_BORDER = [44, 52, 65, 1] as const;
+/** The dialog's corner radius (.bet-card). */
+const PANEL_RADIUS = 10;
 /** And how much it blurs, in px. */
 const BEHIND_BLUR = 7;
 
@@ -101,9 +110,20 @@ export function HeroModal({
         st.top = `${lerp(src.y, to.top)}px`;
         st.width = `${Math.max(0, lerp(src.w, to.width))}px`;
         st.height = `${Math.max(0, lerp(src.h, to.height))}px`;
-        st.borderRadius = `${lerp(4, 14)}px`;
-        // Opaque while flying; the panel's own background takes over as it lands.
-        st.opacity = `${open ? Math.min(1, p * 3) : Math.min(1, p * 2.5)}`;
+        // It lands as the dialog itself: its colour turns from the box's into the dialog's, its
+        // corners match, and it's gone by the time it rests (nothing behind the dialog to bleed
+        // round its edges, overshoot included). Closing runs the same in reverse.
+        const land = Math.min(1, Math.max(0, (p - 0.3) / 0.6));
+        const tone = TONES[lastTone.current];
+        const mix = (a: readonly number[], b: readonly number[], k: number) => a.map((v, i) => v + (b[i] - v) * k);
+        const [r, g, b] = mix(tone.bg, PANEL_BG, land);
+        const [br, bgr, bb, ba] = mix(tone.border, PANEL_BORDER, land);
+        st.background = `rgb(${r},${g},${b})`;
+        st.borderColor = `rgba(${br},${bgr},${bb},${ba})`;
+        st.borderRadius = `${lerp(4, PANEL_RADIUS)}px`;
+        const fadeIn = open ? Math.min(1, p * 3) : Math.min(1, p * 2.5);
+        const fadeOut = open ? 1 - Math.min(1, Math.max(0, (p - 0.82) / 0.16)) : 1;
+        st.opacity = `${fadeIn * fadeOut}`;
       }
       if (back.current) back.current.style.opacity = `${Math.min(1, Math.max(0, p))}`;
       if (panel.current) {
