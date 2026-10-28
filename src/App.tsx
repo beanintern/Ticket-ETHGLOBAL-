@@ -14,6 +14,9 @@ import { EasyPanel, sellEstimate } from './components/EasyPanel';
 import { AssetPicker } from './components/AssetPicker';
 import { TickFlash } from './components/TickFlash';
 import { ModeChooser } from './components/ModeChooser';
+import { ShareTrade } from './components/ShareTrade';
+import { tokenLogo } from './components/AssetPicker';
+import type { ShareData } from './lib/shareCard';
 import { motionPref, reduceMotion, setMotionPref, systemReducesMotion } from './lib/motion';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
@@ -494,6 +497,34 @@ export default function App() {
     // A bet just sold stays hidden until the account has been read since.
     ...(fromAccount?.bets.filter((b) => !(soldAt[b.id] && heldAt <= soldAt[b.id])) ?? []),
   ];
+  // After a trade fills: the share card (once the trade dialog has flown back to its box).
+  const [share, setShare] = useState<ShareData | null>(null);
+  const shareOf = (p: Position, chance?: number): ShareData | null => {
+    if (!p.bet) return null;
+    const m = markets[p.asset];
+    const paid = p.bet.entry * p.bet.shares;
+    const from = Date.now() - 10 * DAY;
+    return {
+      asset: p.asset,
+      dir: p.bet.dir,
+      level: p.bet.level,
+      expiry: p.bet.expiry,
+      multiple: p.bet.shares / paid,
+      chance,
+      spot: p.openSpot || m.spot,
+      stake: paid,
+      payout: p.bet.shares,
+      closes: [...m.candles.filter((c) => c.t >= from).map((c) => ({ t: c.t, c: c.c })), { t: Date.now(), c: m.spot }],
+      logo: tokenLogo(p.asset),
+    };
+  };
+  const offerShare = (p: Position, chance?: number) => {
+    const d = shareOf(p, chance);
+    // Not in automated checks (which trade on), unless one asks for it.
+    const w = window as unknown as { __TICKET_TEST__?: boolean; __TICKET_SHARE__?: boolean };
+    if (w.__TICKET_TEST__ && !w.__TICKET_SHARE__) return;
+    if (d) setTimeout(() => setShare(d), reduceMotion() ? 0 : 450);
+  };
   const buyBet = (q: BetQuote, amount: number) => {
     // Sized as it would be on Derive: fees included, contracts on its 0.01 grid, at least its minimum.
     const size = q.unavailable || amount < minStake(q, markets[q.asset].spot) ? null : sizeBet(q, amount, markets[q.asset].spot);
@@ -516,6 +547,7 @@ export default function App() {
     setPositions((ps) => [pos, ...ps]);
     setPick(null);
     setToast(`Bought: pays ${usd(shares, 2)} if right (${fmtMultiple(shares / (premium + fees))} with fees): ${pos.name} (paper)`);
+    offerShare(pos, q.price);
   };
   const easyLayer = easy
     ? {
@@ -777,6 +809,7 @@ export default function App() {
     setToast(
       `Bought: pays ${usd(shares, 2)} if right (${fmtMultiple(shares / paid)} with fees) on ${trading.info.name}: ${pos.name}${fill.filled < 1 ? ` (${Math.round(fill.filled * 100)}% filled)` : ''}`,
     );
+    offerShare(pos, q.price);
   };
 
   /** Why a bet held on Derive can't be sold from here right now, or null. */
@@ -932,6 +965,7 @@ export default function App() {
         {net && <AccountButton info={NETS[net]} account={accountState} onOpen={() => setAccountOpen(true)} />}
       </header>
       {askMode && <ModeChooser onChoose={chooseMode} />}
+      {share && <ShareTrade data={share} onClose={() => setShare(null)} />}
       {accountOpen && (
         <AccountPanel
           info={NETS[net!]}
@@ -1134,6 +1168,10 @@ export default function App() {
             bets={bets}
             pickedAt={pick?.rect ?? null}
             otherLegs={fromAccount?.otherLegs ?? 0}
+            onShare={(p) => {
+              const d = shareOf(p);
+              if (d) setShare(d);
+            }}
             onSellPaper={sellBetPaper}
             sellBlocked={sellBlocked}
             venue={

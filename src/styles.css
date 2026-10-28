@@ -533,3 +533,14 @@ html.reduce-motion .tick-up, html.reduce-motion .tick-down { animation: none; }
 @keyframes mode-in { from { opacity: 0; transform: scale(0.985); } }
 .workspace.mode-fade { animation: mode-in 300ms cubic-bezier(0.2, 0.8, 0.2, 1); }
 html.reduce-motion .workspace { view-transition-name: none; }
+
+/* Share card after a trade */
+.share-modal { width: min(640px, 100%); gap: 12px; animation: share-in 260ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+@keyframes share-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } }
+html.reduce-motion .share-modal { animation: none; }
+.share-card { width: 100%; height: auto; aspect-ratio: 1200 / 630; border-radius: 10px; border: 1px solid var(--line-2); display: block; }
+.share-options { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+.share-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.share-actions .ghost, .share-actions .primary { height: 34px; }
+.share-link { margin: 0; overflow-wrap: anywhere; }
+.share-note { color: var(--profit); font-weight: 600; }

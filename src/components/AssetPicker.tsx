@@ -12,6 +12,9 @@ const LOGOS = Object.fromEntries(
   ]),
 );
 
+/** A token's bundled logo URL, if there is one. */
+export const tokenLogo = (asset: Asset): string | undefined => LOGOS[asset];
+
 /** A token's logo, or a lettered badge in a colour of its own for one without a logo. */
 export function TokenIcon({ asset, size = 20 }: { asset: Asset; size?: number }) {
   const [failed, setFailed] = useState(false);

@@ -23,6 +23,8 @@ interface Props {
   /** Paper bet at the preview price. */
   onBuy: (q: BetQuote, stake: number) => void;
   bets: Position[];
+  /** Share a position (the share card). */
+  onShare?: (pos: Position) => void;
   /** Where the picked box is on screen: the trade dialog grows out of it. */
   pickedAt?: Rect | null;
   /** Contracts in the Derive account that aren't part of a bet (shown in Pro). */
@@ -64,7 +66,7 @@ type Flow =
   | { kind: 'filling' }
   | { kind: 'error'; message: string };
 
-export function EasyPanel({ asset, now, markets, pending, stake, onStake: setStake, onCancel, onBuy, bets, pickedAt = null, otherLegs = 0, onSellPaper, sellBlocked, venue }: Props) {
+export function EasyPanel({ asset, now, markets, pending, stake, onStake: setStake, onCancel, onBuy, bets, pickedAt = null, onShare, otherLegs = 0, onSellPaper, sellBlocked, venue }: Props) {
   const spot = pending ? markets[pending.asset].spot : 0;
   // What the stake buys at the preview price, Derive's fees included, on Derive's size grid.
   const size = pending ? sizeBet(pending, stake, spot) : null;
@@ -419,6 +421,11 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                                 : `Sell ${b.venue ? '≥ ' : ''}${usd(est.proceeds)}`}
                         </button>
                       ))}
+                    {!done && onShare && (
+                      <button className="link" onClick={() => onShare(b)}>
+                        Share
+                      </button>
+                    )}
                   </div>
                   {flow.kind === 'worse' && <p className="fine">The best bid is {usd(flow.total)} after fees, under the {usd(est?.proceeds ?? 0)} shown.</p>}
                   {flow.kind === 'none' && <p className="fine">No market maker bid for it just now. Try again in a moment.</p>}

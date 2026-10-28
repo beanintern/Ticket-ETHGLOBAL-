@@ -210,6 +210,15 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
   little and frosts (blurred and dimmed, frozen while covered); closing flies it back. Reduced
   motion skips the flight.
   Placed bets are outlined on their box with what went in and what they're worth now.
+  After a trade fills, a **share card** pops up (`src/components/ShareTrade.tsx`,
+  `src/lib/shareCard.ts`): a 1200×630 image led by the multiple, then the price target, then the
+  date, with how far the price has to move, the chance, a small chart with the target line, and
+  optionally the size. Share (the system share sheet, with the image where supported), post on X,
+  download the image or copy the link. Each open position has a Share button too.
+  **Referrals** (`src/lib/referral.ts`) are groundwork only: each browser gets a referral code,
+  share links carry `?ref=CODE`, and a visitor arriving through one remembers it
+  (`ticket.referredBy`); rewards come later. Links point at `VITE_PUBLIC_URL` if set (e.g. a
+  custom domain), else the page's own address.
   With a Derive account connected, **Your bets** come from the account itself (`src/lib/bets.ts`):
   every subaccount's option positions are read (`private/get_all_portfolios`) and each bought
   option is paired with the nearest sold one of the same subaccount, asset, expiry and type on
