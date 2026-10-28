@@ -202,16 +202,16 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             {/* What matters most first: what you'd get, and how likely that is. */}
             <div className="bet-hero">
               <div className="bet-win">
-                <span className="bet-hero-label">You win</span>
-                <span className="num bet-win-amount" style={{ fontSize: shares >= 1e5 ? 26 : shares >= 1e4 ? 30 : undefined }}>
-                  {blocked ? '–' : usd(shares, shares >= 100 ? 0 : 2)}
+                <span className="bet-hero-label">You profit</span>
+                <span className={`num bet-win-amount ${!blocked && shares < size!.cost ? 'down' : ''}`} style={{ fontSize: shares >= 1e5 ? 26 : shares >= 1e4 ? 30 : undefined }}>
+                  {blocked ? '–' : usd(shares - size!.cost, shares - size!.cost >= 100 ? 0 : 2)}
                 </span>
                 <span className="bet-hero-sub">
                   {blocked ? (
                     `for a $${stake} bet`
                   ) : (
                     <>
-                      <b className="num bet-mult">{fmtMultiple(payoutMultiple(pending, stake, spot))}</b> · {signedUsd(shares - size!.cost)} profit or more
+                      or more · <b className="num bet-mult">{fmtMultiple(payoutMultiple(pending, stake, spot))}</b> · {usd(shares, 2)} back if right
                     </>
                   )}
                 </span>
