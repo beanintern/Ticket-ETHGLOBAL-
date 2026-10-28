@@ -38,7 +38,7 @@ changing them.
 - If executing a trade times out (Derive's code 9000, "Order confirmation timeout"), the app
   looks for it in the subaccount's trade history before saying anything: it may have filled.
   If it can't tell, it says so and asks the user to check positions rather than retry.
-- GitHub Actions (`.github/workflows/checks.yml`) runs the build, `check:bets`, `check:chart` and `check:easy`
+- GitHub Actions (`.github/workflows/checks.yml`) runs the build, `check:bets`, `check:chart`, `check:easy` and `check:presets`
   on every push. To stop a red build deploying, turn on **Wait for CI** in the Railway service's
   settings.
 - The deployed app defaults to live Derive data: each visitor's browser connects to Derive's
@@ -97,12 +97,17 @@ npm run check:live    # the live Derive layer against the real exchange
 NETWORK=testnet npm run check:live
 npm run check:rfq     # Easy mode's RFQ preview and fee estimate against Derive's real RFQ trades
 npm run check:bets    # Easy bets read back from a Derive account's positions
+npm run check:presets # every Build preset in every view: zooms, pans, stretches, phone
 npm run check:deposit # the in-app deposit against Derive's real contracts (nothing is sent)
 NETWORK=testnet npm run check:deposit
 npm run check:draw    # draws paths with the mouse and checks the position built from each
 npm run check:easy    # Easy mode grid: boxes, share prices vs independent pricing, sizes, fees, $1 payout
 ```
 
+- `check:presets` clicks each Build preset (call spread, put spread, straddle, strangle, iron
+  condor, Chaos) in ETH, BTC, SOL, ADA and PUMP, and checks it at every zoom (1D to 1Y), zoomed in
+  and out vertically, panned up and down, with now at the left and right, and on a phone-sized
+  screen: 450 views, each through check:chart's verifier (`scripts/chart-inspect.mjs`).
 - `check:chart` checks named structures (spreads, condors, butterflies, calendars, single
   options, each at several zooms and with the expiry at the chart's edge) and then random
   positions. For each it verifies, against an independent calculation, the leg dots, the P&L

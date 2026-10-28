@@ -22,3 +22,4 @@ jobs:
       - run: npm run check:bets
       - run: npm run check:chart
       - run: npm run check:easy
+      - run: node scripts/check-presets.mjs
