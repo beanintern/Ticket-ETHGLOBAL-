@@ -525,3 +525,4 @@ button:focus-visible, select:focus-visible, input:focus-visible + .switch-track 
 .hero-panel .bet-card { background: var(--panel); box-shadow: 0 24px 70px rgba(0,0,0,0.5); }
 /* Behind an open modal the page is frozen and blurred: no flashes to re-blur every frame. */
 .hero-open .app .tick-up, .hero-open .app .tick-down { animation: none; }
+.replay-intro { height: 26px; padding: 0 9px; font-size: 11.5px; white-space: nowrap; }

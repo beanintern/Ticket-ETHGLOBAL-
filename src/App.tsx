@@ -887,6 +887,10 @@ export default function App() {
             Pro
           </button>
         </div>
+        {/* TEMPORARY, for testing: shows the first-visit Easy / Pro chooser again. Remove before launch. */}
+        <button className="ghost replay-intro" onClick={() => setAskMode(true)} title="Show the first-visit Easy / Pro chooser again (testing)">
+          Replay intro
+        </button>
         <SourceSwitch source={source} />
         {net && <AccountButton info={NETS[net]} account={accountState} onOpen={() => setAccountOpen(true)} />}
       </header>
