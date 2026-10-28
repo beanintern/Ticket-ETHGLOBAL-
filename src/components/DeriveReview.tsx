@@ -15,7 +15,7 @@ export interface Trading {
   prepare: (legs: Leg[], mode: OrderMode) => Promise<{ orders: LegOrder[]; previews: OrderPreview[] }>;
   place: (orders: LegOrder[], mode: OrderMode) => Promise<OrderResult[]>;
   /** RFQ for a package of legs (bought or sold as a whole): the best firm quote, or null if none came. */
-  rfqQuote: (legs: Leg[], direction: 'buy' | 'sell') => Promise<RfqQuote | null>;
+  rfqQuote: (legs: Leg[], direction: 'buy' | 'sell', subaccountId?: number) => Promise<RfqQuote | null>;
   rfqExecute: (q: RfqQuote) => Promise<RfqFill>;
   rfqCancel: (q: RfqQuote) => Promise<void>;
 }

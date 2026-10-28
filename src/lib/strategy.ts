@@ -28,6 +28,8 @@ export interface Position {
   bet?: BetInfo;
   /** Where it was traded: absent for paper; Derive mainnet (real USDC) or testnet (test funds). */
   venue?: 'derive-mainnet' | 'derive-testnet';
+  /** For a bet read from a Derive account: the subaccount holding it (it's sold from there). */
+  subaccountId?: number;
 }
 
 export interface ClosedPosition {

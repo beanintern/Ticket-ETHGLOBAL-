@@ -19,5 +19,6 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run build
+      - run: npm run check:bets
       - run: npm run check:chart
       - run: npm run check:easy

@@ -23,6 +23,8 @@ interface Props {
   /** Paper bet at the preview price. */
   onBuy: (q: BetQuote, stake: number) => void;
   bets: Position[];
+  /** Contracts in the Derive account that aren't part of a bet (shown in Pro). */
+  otherLegs?: number;
   /** Paper sale at the estimate the Sell button shows. */
   onSellPaper: (id: string) => void;
   /** Why a bet held on Derive can't be sold from here right now (wrong network, not connected), or null. */
@@ -36,7 +38,7 @@ interface Props {
         kind: 'live';
         trading: Trading;
         onBoughtLive: (q: BetQuote, quote: RfqQuote, fill: RfqFill) => void;
-        onSoldLive: (id: string, quote: RfqQuote, fill: RfqFill) => void;
+        onSoldLive: (pos: Position, quote: RfqQuote, fill: RfqFill) => void;
       };
 }
 
@@ -66,7 +68,7 @@ type Flow =
   | { kind: 'filling' }
   | { kind: 'error'; message: string };
 
-export function EasyPanel({ asset, now, markets, pending, stake, onStake: setStake, onCancel, onBuy, bets, onSellPaper, sellBlocked, venue }: Props) {
+export function EasyPanel({ asset, now, markets, pending, stake, onStake: setStake, onCancel, onBuy, bets, otherLegs = 0, onSellPaper, sellBlocked, venue }: Props) {
   const spot = pending ? markets[pending.asset].spot : 0;
   // What the stake buys at the preview price, Derive's fees included, on Derive's size grid.
   const size = pending ? sizeBet(pending, stake, spot) : null;
@@ -148,7 +150,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
     const fill = await live.trading.rfqExecute(quote);
     if (fill.ok) {
       setSell(pos.id, { kind: 'idle' });
-      live.onSoldLive(pos.id, quote, fill);
+      live.onSoldLive(pos, quote, fill);
     } else setSell(pos.id, { kind: 'error', message: fill.uncertain ? fill.error! : `Couldn’t fill: ${fill.error ?? 'rejected'}` });
   };
   const startSell = async (pos: Position) => {
@@ -159,7 +161,8 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
     if (live.trading.info.real && flow !== 'confirm') return setSell(pos.id, { kind: 'confirm' });
     setSell(pos.id, { kind: 'quoting' });
     try {
-      const quote = await live.trading.rfqQuote(pos.legs, 'sell');
+      // From the subaccount that holds it, whichever one the chart's asset is using.
+      const quote = await live.trading.rfqQuote(pos.legs, 'sell', pos.subaccountId);
       if (!quote) return setSell(pos.id, { kind: 'none' });
       const total = -quote.premium - quote.fee;
       if (total >= sellEstimate(pos, markets, now).proceeds - 0.005) await fillSell(pos, quote);
@@ -373,6 +376,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             )}
           </div>
           {open.length === 0 && settled.length === 0 && <p className="fine">No bets yet.</p>}
+          {otherLegs > 0 && <p className="fine">Your Derive account also holds options that aren’t bets: see them in Pro.</p>}
           <ul className="bet-list">
             {[...open, ...settled].map((b) => {
               const bet = b.bet!;

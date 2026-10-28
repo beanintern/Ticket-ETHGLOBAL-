@@ -33,6 +33,11 @@ export interface AccountPosition {
   openedAt: number;
 }
 
+/** An option position in one of the wallet's subaccounts. */
+export interface HeldOption extends AccountPosition {
+  subaccountId: number;
+}
+
 export interface AccountOrder {
   id: string;
   instrument: string;
@@ -72,6 +77,13 @@ export interface AccountState {
   scopes: string[] | null;
   canTrade: boolean | null;
   portfolio: Portfolio | null;
+  /**
+   * Option positions across every subaccount, or null until read (or when Derive couldn't read
+   * one of them). Easy mode's bets come from these, so they follow the account to any device.
+   */
+  held: HeldOption[] | null;
+  /** When `held` was read: anything traded before this is reflected in it. */
+  heldAt: number;
 }
 
 /** Derive's dry-run of one order: will it go through, at what price and fee. */
@@ -103,6 +115,8 @@ export interface RfqLegIn {
 /** A maker's firm quote for a whole package, as the taker sees it. */
 export interface RfqQuote {
   rfqId: string;
+  /** The subaccount the RFQ was sent from, and that executes it. */
+  subaccountId: number;
   /** Buying or selling the package (the legs as given). */
   direction: 'buy' | 'sell';
   /** What the SDK needs to execute it. */
@@ -225,7 +239,7 @@ export class DeriveAccount {
     owner: string,
     signer: string,
   ) {
-    this.state = { status: 'connecting', error: null, owner, signer, subaccountIds: [], subaccountId: null, groups: {}, scopes: null, canTrade: null, portfolio: null };
+    this.state = { status: 'connecting', error: null, owner, signer, subaccountIds: [], subaccountId: null, groups: {}, scopes: null, canTrade: null, portfolio: null, held: null, heldAt: 0 };
   }
 
   /** Validates the credentials, logs in over the WebSocket and starts polling the portfolio. */
@@ -324,9 +338,43 @@ export class DeriveAccount {
     }
   }
 
+  /** Every subaccount's option positions, in one call. */
+  private async refreshHeld() {
+    if (!this.client) return;
+    const startedAt = Date.now();
+    try {
+      const all = await this.client.send('private/get_all_portfolios', { wallet: this.state.owner });
+      // A subaccount Derive couldn't read would look like one with no positions: keep the last read.
+      if (all.some((s) => s.failed_to_fetch)) return;
+      const held: HeldOption[] = [];
+      for (const s of all) {
+        this.state.groups = { ...this.state.groups, [s.subaccount_id]: s.risk_universe_id };
+        for (const p of s.positions) {
+          const opt = parseOptionName(p.instrument_name);
+          const amount = num(p.amount);
+          if (!opt || !amount) continue;
+          held.push({
+            subaccountId: s.subaccount_id,
+            instrument: p.instrument_name,
+            ...opt,
+            amount,
+            averagePrice: num(p.average_price),
+            markPrice: num(p.mark_price),
+            unrealizedPnl: num(p.unrealized_pnl),
+            openedAt: p.creation_timestamp > 1e12 ? p.creation_timestamp : p.creation_timestamp * 1000,
+          });
+        }
+      }
+      this.state.held = held;
+      this.state.heldAt = startedAt;
+    } catch {
+      /* keep the last read; try again on the next refresh */
+    }
+  }
+
   async refresh() {
     if (this.closed || !this.client) return;
-    await this.refreshSubaccounts();
+    await Promise.all([this.refreshSubaccounts(), this.refreshHeld()]);
     const id = this.state.subaccountId;
     if (id === null) {
       this.state.status = 'ready';
@@ -470,8 +518,7 @@ export class DeriveAccount {
    * quote, or null if none came within RFQ_WAIT_MS (the RFQ is then cancelled). Nothing trades
    * until `rfqExecute`. The builder code rides on the RFQ.
    */
-  async rfqQuote(legs: RfqLegIn[], direction: 'buy' | 'sell'): Promise<RfqQuote | null> {
-    const subaccountId = this.state.subaccountId;
+  async rfqQuote(legs: RfqLegIn[], direction: 'buy' | 'sell', subaccountId = this.state.subaccountId): Promise<RfqQuote | null> {
     if (subaccountId === null) throw new Error('No subaccount');
     const wire = legs.map((l) => ({ instrument_name: l.instrument, amount: l.amount, direction: l.direction }));
     let rfqId: string;
@@ -504,6 +551,7 @@ export class DeriveAccount {
         }
         best = {
           rfqId,
+          subaccountId,
           direction,
           quote: { rfq_id: q.rfq_id, quote_id: q.quote_id, direction: q.direction, legs: q.legs },
           // The quote's legs are the RFQ's legs, from the taker's side; selling the package reverses them.
@@ -517,14 +565,13 @@ export class DeriveAccount {
         /* keep polling */
       }
     }
-    if (!best) await this.rfqCancel(rfqId);
+    if (!best) await this.rfqCancel(rfqId, subaccountId);
     return best;
   }
 
   /** Executes a quote from `rfqQuote`: the whole package fills at its prices, or nothing does. */
   async rfqExecute(q: RfqQuote): Promise<RfqFill> {
-    const subaccountId = this.state.subaccountId;
-    if (subaccountId === null) throw new Error('No subaccount');
+    const subaccountId = q.subaccountId;
     const startedAt = Date.now();
     try {
       const res = await this.sdk.rfq.executeQuote({ subaccountId, quote: q.quote as never, maxFee: q.maxFee, label: 'ticket' });
@@ -559,8 +606,7 @@ export class DeriveAccount {
     return { ok: false, filled: 0, fee: 0, error: UNCERTAIN_TEXT, uncertain: true };
   }
 
-  async rfqCancel(rfqId: string) {
-    const subaccountId = this.state.subaccountId;
+  async rfqCancel(rfqId: string, subaccountId = this.state.subaccountId) {
     if (subaccountId === null) return;
     await this.sdk.rfq.cancelRfq({ subaccountId, rfqId }).catch(() => {});
   }

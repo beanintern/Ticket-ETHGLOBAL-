@@ -8,6 +8,7 @@ import { AccountButton, AccountPanel } from './components/AccountPanel';
 import { Chart, TOOL_LEG, type ChartView, type LegTool, type Tool } from './components/Chart';
 import { fitPath, payoffAlongPath, type PathPoint } from './lib/pathfit';
 import { betLegs, betQuestion, fmtCents, minStake, quoteBet, sizeBet, type BetQuote } from './lib/binary';
+import { betsFromHeld } from './lib/bets';
 import { EasyPanel, sellEstimate, sharePrice } from './components/EasyPanel';
 import { AssetPicker } from './components/AssetPicker';
 import { TickFlash } from './components/TickFlash';
@@ -268,6 +269,8 @@ export default function App() {
   const accountEnabled = net !== null;
   const [account, setAccount] = useState<DeriveAccount | null>(null);
   const [accountState, setAccountState] = useState<AccountState | null>(null);
+  /** Bets read from the account and sold here, by id: when, so they stay hidden until the account shows it. */
+  const [soldAt, setSoldAt] = useState<Record<string, number>>({});
   const [accountOpen, setAccountOpen] = useState(false);
   const [savedCreds] = useState(() => (net ? loadCredentials(net) : null));
   const connectAccount = useCallback(
@@ -415,7 +418,37 @@ export default function App() {
     easy && pick && pick.asset === asset ? quoteBet(market, asset, pick.expiry, pick.lo, now, { lo: pick.lo, hi: pick.hi }) : null;
   const chartLegs = easy ? [] : [...staticLegs, ...editableLegs];
   const chartModel = buildModel(chartLegs, market, now);
-  const bets = positions.filter((p) => p.bet);
+  // Easy bets. With a Derive account connected, its bets come from the account's positions (so
+  // they're the same on any device, and gone once sold anywhere); paper bets and bets on a network
+  // that isn't connected come from this browser's records.
+  const liveVenue = account ? NETS[account.net].venue : null;
+  const held = accountState?.held ?? null;
+  const heldAt = accountState?.heldAt ?? 0;
+  const fromAccount =
+    liveVenue && held
+      ? betsFromHeld(
+          held,
+          heldAt,
+          liveVenue,
+          positions,
+          now,
+          (a, y) => markets[a].expiries.find((e) => ymd(e.ts) === y)?.ts ?? Date.UTC(+y.slice(0, 4), +y.slice(4, 6) - 1, +y.slice(6, 8), 8),
+          (a, t) => priceAt(markets[a].candles, t) || markets[a].spot,
+        )
+      : null;
+  // Records of bets the account no longer holds (sold elsewhere) are dropped, so they don't
+  // reappear when the account is disconnected.
+  const stale = fromAccount?.stale.join(',') ?? '';
+  useEffect(() => {
+    if (!stale) return;
+    const gone = new Set(stale.split(','));
+    setPositions((ps) => ps.filter((p) => !gone.has(p.id)));
+  }, [stale]);
+  const bets = [
+    ...positions.filter((p) => p.bet && !(fromAccount && p.venue === liveVenue)),
+    // A bet just sold stays hidden until the account has been read since.
+    ...(fromAccount?.bets.filter((b) => !(soldAt[b.id] && heldAt <= soldAt[b.id])) ?? []),
+  ];
   const buyBet = (q: BetQuote, amount: number) => {
     // Sized as it would be on Derive: fees included, contracts on its 0.01 grid, at least its minimum.
     const size = q.unavailable || amount < minStake(q, markets[q.asset].spot) ? null : sizeBet(q, amount, markets[q.asset].spot);
@@ -622,7 +655,7 @@ export default function App() {
         return { orders, previews: await account.preview(orders, mode) };
       },
       place: (orders, mode) => account.place(orders, mode),
-      rfqQuote: async (legs, direction) => {
+      rfqQuote: async (legs, direction, subaccount) => {
         const instruments = await account.instruments(legs.map(instrumentName));
         const rfqLegs = legs.map((l) => {
           const name = instrumentName(l);
@@ -632,7 +665,7 @@ export default function App() {
           if (Number(amount) < spec.minAmount) throw new Error(`Too small: Derive's minimum is ${spec.minAmount} contracts per option.`);
           return { instrument: name, amount, direction: (l.side > 0 ? 'buy' : 'sell') as 'buy' | 'sell' };
         });
-        return account.rfqQuote(rfqLegs, direction);
+        return account.rfqQuote(rfqLegs, direction, subaccount);
       },
       rfqExecute: (q) => account.rfqExecute(q),
       rfqCancel: (q) => account.rfqCancel(q.rfqId),
@@ -708,7 +741,9 @@ export default function App() {
 
   const closeBet = (pos: Position, proceeds: number, where: string) => {
     const paid = pos.bet ? pos.bet.entry * pos.bet.shares : 0;
-    setPositions((ps) => ps.filter((p) => p.id !== pos.id));
+    // This browser's records of the same bet go with it (a bet read from the account may stand for several).
+    const same = (p: Position) => p.id === pos.id || (!!pos.venue && p.venue === pos.venue && !!p.bet && !!pos.bet && p.asset === pos.asset && p.bet.expiry === pos.bet.expiry && p.bet.dir === pos.bet.dir && p.bet.lo === pos.bet.lo && p.bet.hi === pos.bet.hi);
+    setPositions((ps) => ps.filter((p) => !same(p)));
     setClosed((c) => [{ id: pos.id, asset: pos.asset, name: pos.name, openedAt: pos.openedAt, closedAt: now, realized: proceeds - paid }, ...c]);
     setToast(`Sold${where}: ${pos.name} (${signedUsd(proceeds - paid)})`);
   };
@@ -718,9 +753,9 @@ export default function App() {
     if (pos) closeBet(pos, sellEstimate(pos, markets, now).proceeds, ' (paper)');
   };
   // On Derive: sold by RFQ, at a maker's quote for the whole spread (RFQs fill all-or-nothing).
-  const onSoldLive = (id: string, quote: RfqQuote, fill: RfqFill) => {
-    const pos = positions.find((p) => p.id === id);
-    if (!pos || !trading) return;
+  const onSoldLive = (pos: Position, quote: RfqQuote, fill: RfqFill) => {
+    if (!trading) return;
+    setSoldAt((s) => ({ ...s, [pos.id]: Date.now() }));
     closeBet(pos, -quote.premium - (fill.fee || quote.fee), ` on ${trading.info.name}`);
   };
 
@@ -1032,6 +1067,7 @@ export default function App() {
             onCancel={() => setPick(null)}
             onBuy={buyBet}
             bets={bets}
+            otherLegs={fromAccount?.otherLegs ?? 0}
             onSellPaper={sellBetPaper}
             sellBlocked={sellBlocked}
             venue={

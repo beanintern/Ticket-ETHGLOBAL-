@@ -38,7 +38,7 @@ changing them.
 - If executing a trade times out (Derive's code 9000, "Order confirmation timeout"), the app
   looks for it in the subaccount's trade history before saying anything: it may have filled.
   If it can't tell, it says so and asks the user to check positions rather than retry.
-- GitHub Actions (`.github/workflows/checks.yml`) runs the build, `check:chart` and `check:easy`
+- GitHub Actions (`.github/workflows/checks.yml`) runs the build, `check:bets`, `check:chart` and `check:easy`
   on every push. To stop a red build deploying, turn on **Wait for CI** in the Railway service's
   settings.
 - The deployed app defaults to live Derive data: each visitor's browser connects to Derive's
@@ -96,6 +96,7 @@ SEED=7 ONLY=113 npm run check:chart   # replay one case
 npm run check:live    # the live Derive layer against the real exchange
 NETWORK=testnet npm run check:live
 npm run check:rfq     # Easy mode's RFQ preview and fee estimate against Derive's real RFQ trades
+npm run check:bets    # Easy bets read back from a Derive account's positions
 npm run check:deposit # the in-app deposit against Derive's real contracts (nothing is sent)
 NETWORK=testnet npm run check:deposit
 npm run check:draw    # draws paths with the mouse and checks the position built from each
@@ -192,6 +193,14 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
   fee on each leg). The card shows the preview, the fair price and chance, shares, fees (at most)
   and payout; **Show underlying positions** lists the two options at the preview's leg prices.
   Placed bets are outlined on their box with what went in and what they're worth now.
+  With a Derive account connected, **Your bets** come from the account itself (`src/lib/bets.ts`):
+  every subaccount's option positions are read (`private/get_all_portfolios`) and each bought
+  option is paired with the nearest sold one of the same subaccount, asset, expiry and type on
+  its paying side (a higher call, a lower put). So bets show on any device, disappear once sold
+  anywhere, and match what's really held; each is sold from the subaccount that holds it. Bets
+  bought in this browser add the price paid with fees (otherwise it's Derive's average price,
+  before fees), and show as soon as they fill, before the account catches up. Options that don't
+  pair into a bet stay in Pro. `npm run check:bets` checks the pairing.
 
   With a Derive account connected, bets are real: real USDC on **Live**, test funds on
   **Testnet**. **Buy** sends an RFQ for the spread and collects quotes for a few seconds. If the
