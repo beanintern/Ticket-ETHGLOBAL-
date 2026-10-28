@@ -302,7 +302,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                         ? 'Buying…'
                         : buy.kind === 'confirm'
                           ? `Confirm: buy for up to ${usd(size?.cost ?? 0, 2)} USDC`
-                          : `Buy Yes on ${live.trading.info.name} · up to ${size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}`}
+                          : `Buy on ${live.trading.info.name} · up to ${size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}`}
                   </button>
                 )}
                 <button className="link" disabled={blocked || busy} onClick={() => onBuy(pending, stake)}>
@@ -312,7 +312,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
             ) : (
               <>
                 <button className="primary" disabled={blocked} onClick={() => onBuy(pending, stake)}>
-                  Buy Yes · {size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}
+                  Buy · {size && !tooSmall ? usd(size.cost, 2) : usd(stake, 0)}
                   {venue.kind === 'connect' ? ' (paper)' : ''}
                 </button>
                 {venue.kind === 'connect' && venue.missingGroup ? (
