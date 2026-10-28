@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RfqFill, RfqQuote } from '../account/derive';
 import type { Trading } from './DeriveReview';
-import { betLegs, betQuestion, fmtCents, fmtChance, MIN_BET, minStake, previewBid, rfqFee, sharePayoff, sizeBet, type BetQuote } from '../lib/binary';
+import { betLegs, betQuestion, fmtChance, fmtMultiple, MIN_BET, minStake, previewBid, rfqFee, sharePayoff, sizeBet, type BetQuote } from '../lib/binary';
 import { instrumentName } from '../account/orders';
 import { compactUsd, fmtQty, fmtStrike, signedUsd, usd } from '../lib/format';
 import { expiryLabel, type Asset } from '../lib/market';
@@ -9,7 +9,6 @@ import { buildModel, type Position } from '../lib/strategy';
 import type { Market } from '../data/types';
 import type { NetInfo } from '../account/network';
 
-const cents = fmtCents;
 const pnlClass = (v: number) => (v > 0.005 ? 'up' : v < -0.005 ? 'down' : '');
 
 interface Props {
@@ -190,7 +189,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               on that box's date.
             </p>
             <p className="fine">
-              Each box shows the most a share that pays $1 if you're right should cost: <b>25¢</b> means about a 25% chance, and $10 buys about 40 shares
+              Each box shows what a bet pays back if you're right, at least: <b>4×</b> means about a 25% chance, and $10 comes back as about $40
               (less Derive's fees). When you buy, market makers quote a firm price, usually lower. Further away and sooner is cheaper. Bets start at $10.
             </p>
           </div>
@@ -224,8 +223,8 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
               </div>
             </div>
             <div className="bet-price">
-              <span className="num">{cents(pending.preview)}</span>
-              <span>a share at most (fair {cents(pending.price)}); each share pays $1 if right</span>
+              <span className="num">{fmtMultiple(pending.preview)}</span>
+              <span>your money back if right, at least (fair {fmtMultiple(pending.price)}), before Derive's fees</span>
             </div>
             <label className="bet-stake">
               <span>Amount</span>
@@ -280,7 +279,7 @@ export function EasyPanel({ asset, now, markets, pending, stake, onStake: setSta
                 {buy.kind === 'worse' ? (
                   <>
                     <p className="form-error">
-                      The best quote is {usd(buy.total, 2)} for {shares.toFixed(1)} shares ({cents(buy.quote.premium / shares)} a share), above the{' '}
+                      The best quote is {usd(buy.total, 2)} for {shares.toFixed(1)} shares (pays {fmtMultiple(buy.total / shares)}), above the{' '}
                       {usd(size?.cost ?? 0, 2)} shown.
                     </p>
                     <button className="primary" onClick={() => void fillBuy(buy.quote)}>

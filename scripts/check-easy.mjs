@@ -162,7 +162,9 @@ for (const [asset, horizon, colFrac, chance, stake, pan = 0] of cases) {
     // 3. Card, underlying positions, purchase.
     const shown = (await page.textContent('.bet-price .num')).trim();
     const c = pick.preview * 100;
-    const want = c >= 9.95 ? `${Math.round(c)}¢` : `${(Math.round(c * 10) / 10).toFixed(1)}¢`;
+    // Shown as a payout multiple ($1 a share over the preview price), rounded down.
+    const m = 100 / c;
+    const want = m >= 10 ? `${Math.floor(m)}×` : `${(Math.floor(m * 10) / 10).toFixed(1)}×`;
     if (shown !== want) fail(`card shows ${shown}, box is ${want}`);
     // Under the minimum: can't buy.
     await page.fill('.stake-input input', '5');

@@ -183,7 +183,8 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
 
   **Bets trade by RFQ**, so every listed band can be bet on, book or no book: market makers quote
   the whole spread as one package, which fills whole or not at all. Before anyone asks there's no
-  firm price, so each box shows a **preview**: the fair price plus a markup set on the expensive
+  firm price, so each box shows a **preview**, as the multiple a bet pays back if right ($1 a
+  share over the preview price, rounded down: 16¢ shows as 6.2×). The preview is the fair price plus a markup set on the expensive
   side of where makers quote, max(one tick, k × √(spread's fair price × index)) per contract,
   where k is the asset's own multiplier (`MarketSpec.rfqK`): makers quote SOL or LIT spreads far
   wider than ETH's. Each k is the smallest that was at least what takers actually paid over mark
@@ -198,7 +199,7 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
   RFQ fees estimated high (Derive charges one $0.50 base fee plus, per contract, min(0.03% of the
   index, 12.5% of the price) on the dearer leg only; the estimate charges both, plus any builder
   fee on each leg). The card leads with what you'd get if right (and the profit, at least) next to the
-  chance of winning, then the preview share price, shares, fees and cost (at most); **Show underlying positions** lists the two options at the preview's leg prices.
+  chance of winning, then the preview multiple, shares, fees and cost (at most); **Show underlying positions** lists the two options at the preview's leg prices.
   Placed bets are outlined on their box with what went in and what they're worth now.
   With a Derive account connected, **Your bets** come from the account itself (`src/lib/bets.ts`):
   every subaccount's option positions are read (`private/get_all_portfolios`) and each bought

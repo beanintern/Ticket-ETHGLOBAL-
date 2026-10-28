@@ -7,7 +7,7 @@ import type { Trading } from './components/DeriveReview';
 import { AccountButton, AccountPanel } from './components/AccountPanel';
 import { Chart, TOOL_LEG, type ChartView, type LegTool, type Tool } from './components/Chart';
 import { fitPath, payoffAlongPath, type PathPoint } from './lib/pathfit';
-import { betLegs, betQuestion, fmtCents, minStake, quoteBet, sizeBet, type BetQuote } from './lib/binary';
+import { betLegs, betQuestion, fmtMultiple, minStake, quoteBet, sizeBet, type BetQuote } from './lib/binary';
 import { betsFromHeld } from './lib/bets';
 import { EasyPanel, sellEstimate, sharePrice } from './components/EasyPanel';
 import { AssetPicker } from './components/AssetPicker';
@@ -470,7 +470,7 @@ export default function App() {
     };
     setPositions((ps) => [pos, ...ps]);
     setPick(null);
-    setToast(`Bought ${shares.toFixed(1)} Yes shares at ${fmtCents(premium / shares)} plus ${usd(fees, 2)} fees: ${pos.name} (paper)`);
+    setToast(`Bought: pays ${usd(shares, 2)} if right (${fmtMultiple((premium + fees) / shares)} with fees): ${pos.name} (paper)`);
   };
   const easyLayer = easy
     ? {
@@ -727,7 +727,7 @@ export default function App() {
     setPositions((ps) => [pos, ...ps]);
     setPick(null);
     setToast(
-      `Bought ${shares.toFixed(1)} Yes shares at ${fmtCents(paid / shares)} (fees included) on ${trading.info.name}: ${pos.name}${fill.filled < 1 ? ` (${Math.round(fill.filled * 100)}% filled)` : ''}`,
+      `Bought: pays ${usd(shares, 2)} if right (${fmtMultiple(paid / shares)} with fees) on ${trading.info.name}: ${pos.name}${fill.filled < 1 ? ` (${Math.round(fill.filled * 100)}% filled)` : ''}`,
     );
   };
 
@@ -1019,7 +1019,7 @@ export default function App() {
                 <span>
                   <i className="sw sw-loss" /> Ends below
                 </span>
-                <span className="hint">Each box is the most a share should cost; it pays $1 if the price ends past it on that date · drag to pan · scroll to zoom</span>
+                <span className="hint">Each box is what a bet pays back if the price ends past it on that date, at least · drag to pan · scroll to zoom</span>
                 <span className="hint-touch">Tap a box to bet · a share pays $1 if the price ends past it</span>
               </>
             ) : (

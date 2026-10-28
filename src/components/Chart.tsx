@@ -12,7 +12,7 @@ import {
   type MarketSpec,
 } from '../lib/market';
 import type { Market } from '../data/types';
-import { betQuestion, fmtCents, fmtChance, type BetQuote } from '../lib/binary';
+import { betQuestion, fmtChance, fmtMultiple, type BetQuote } from '../lib/binary';
 import type { PathPoint } from '../lib/pathfit';
 import { buildModel, lifetimeExtremes, type Leg, type Model, type Side } from '../lib/strategy';
 
@@ -1553,7 +1553,7 @@ export function Chart(props: Props) {
         if (vy1 - vy0 >= 12 && vx1 - vx0 >= 30) {
           ctx.font = `${sel || hov ? 700 : 600} ${vy1 - vy0 >= 18 ? 10.5 : 9.5}px ${MONO}`;
           ctx.fillStyle = sel ? '#0c0f14' : hov ? C.text : `rgba(${rgb},${0.45 + 0.55 * heat})`;
-          ctx.fillText(fmtCents(b.q.preview), (vx0 + vx1) / 2, (vy0 + vy1) / 2 + 0.5);
+          ctx.fillText(fmtMultiple(b.q.preview), (vx0 + vx1) / 2, (vy0 + vy1) / 2 + 0.5);
         }
       }
       // Placed bets: an outline on their box, with the price paid and now.
@@ -1706,7 +1706,7 @@ export function Chart(props: Props) {
           lines.push({ text: `${betQuestion(spec.asset, q.dir, q.level)} on ${fmtTime(q.expiry, false)}`, bold: true, color: q.unavailable ? C.muted : col });
           if (q.unavailable) lines.push({ text: q.unavailable, color: C.muted });
           else {
-            lines.push({ text: `Up to ${fmtCents(q.preview)} a share · pays $1 · ${fmtChance(q.price)} chance`, bold: true });
+            lines.push({ text: `Pays ${fmtMultiple(q.preview)} or more · ${fmtChance(q.price)} chance`, bold: true });
             lines.push({ text: 'Click to bet · firm price when you buy', color: C.muted });
           }
         }

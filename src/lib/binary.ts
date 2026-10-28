@@ -178,10 +178,14 @@ export function minStake(q: BetQuote, spot: number): number {
   return Math.max(MIN_BET, Math.ceil(betOfSize(q, q.rules.minAmount, spot).cost));
 }
 
-/** A share price in cents, to a tenth of a cent below 10¢ (so 0.8¢ never shows as 1¢): "21¢", "4.5¢", "0.8¢". */
-export function fmtCents(p: number): string {
-  const c = p * 100;
-  return c >= 9.95 ? `${Math.round(c)}¢` : `${(Math.round(c * 10) / 10).toFixed(1)}¢`;
+/**
+ * What a bet pays back if right, as a multiple of what goes in, for a share price p (it pays $1):
+ * "6.2×", "25×". Rounded down, so it's what you get at least.
+ */
+export function fmtMultiple(p: number): string {
+  if (!(p > 0)) return '–';
+  const m = 1 / p;
+  return m >= 10 ? `${Math.floor(m)}×` : `${(Math.floor(m * 10) / 10).toFixed(1)}×`;
 }
 
 /** A chance in percent, to a tenth below 10%. */
