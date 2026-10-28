@@ -714,6 +714,8 @@ export function Chart(props: Props) {
     ctx.fillText('NOW', Math.max(nowX, 16), plotB + TIME_H / 2);
 
     // ---- Max profit / max loss ----
+    // Their captions are drawn last (after the leg dots), placed clear of them: see below.
+    const zoneLabels: { text: string; col: string; tw: number; tx: number; ty: number }[] = [];
     // Measured over the position's whole life (every expiry and in between), the same as the
     // Build panel, so nothing on the map can beat the stated max.
     if (legsForPnl.length && maxAbs > 1e-9) {
@@ -1081,13 +1083,7 @@ export function Chart(props: Props) {
         const tw = ctx.measureText(text).width;
         const tx = Math.max(nowX + 6, xRef - (compact ? 12 : 8) - tw);
         const ty = Math.max(plotT + 8, Math.min(plotB - 8, capY));
-        ctx.fillStyle = 'rgba(12,15,20,0.72)';
-        ctx.fillRect(tx - 4, ty - 8, tw + 8, 16);
-        dbg.rects.push([tx - 4, ty - 8, tw + 8, 16]);
-        ctx.fillStyle = col;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(text, tx, ty + 0.5);
+        zoneLabels.push({ text, col, tw, tx, ty });
         dbg.zones[dbg.zones.length - 1].labelled = true;
       };
 
@@ -1334,6 +1330,43 @@ export function Chart(props: Props) {
       }
     }
     markersRef.current = markers;
+
+    // Max profit / loss captions, on top of everything on the map and clear of the leg dots, the
+    // group handle and the live price dot: moved up or down a line or two, or past what's in the way.
+    {
+      const pad = 3;
+      const blocked: number[][] = [...markers.map((m) => [m.x - pad, m.y - pad, m.w + 2 * pad, m.h + 2 * pad]), [nowX - 12, sy - 12, 24, 24]];
+      const hits = (r: number[], b: number[]) => r[0] < b[0] + b[2] && b[0] < r[0] + r[2] && r[1] < b[1] + b[3] && b[1] < r[1] + r[3];
+      for (const lb of zoneLabels) {
+        const rect = (x: number, y: number) => [x - 4, y - 8, lb.tw + 8, 16];
+        const inPlot = (x: number, y: number) => y >= plotT + 8 && y <= plotB - 8 && x >= nowX + 2 && x + lb.tw <= plotR - 4;
+        let at: [number, number] = [lb.tx, lb.ty];
+        search: for (const dy of [0, 18, -18, 36, -36, 54, -54]) {
+          const y = lb.ty + dy;
+          let x = lb.tx;
+          // Slide right past whatever is in the way at this height (a few times at most).
+          for (let k = 0; k < 4; k++) {
+            if (!inPlot(x, y)) break;
+            const b = blocked.find((bb) => hits(rect(x, y), bb));
+            if (!b) {
+              at = [x, y];
+              break search;
+            }
+            x = b[0] + b[2] + 6;
+          }
+        }
+        const [tx, ty] = at;
+        blocked.push(rect(tx, ty));
+        ctx.fillStyle = 'rgba(12,15,20,0.72)';
+        ctx.fillRect(tx - 4, ty - 8, lb.tw + 8, 16);
+        dbg.rects.push([tx - 4, ty - 8, lb.tw + 8, 16]);
+        ctx.font = `600 10.5px ${MONO}`;
+        ctx.fillStyle = lb.col;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(lb.text, tx, ty + 0.5);
+      }
+    }
 
     // Group drag: where each leg lands if dropped now.
     if (dragGroup && dragGroup.groupTo) {
