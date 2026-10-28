@@ -1391,7 +1391,7 @@ export function Chart(props: Props) {
     let ghostInfo: string[] | null = null;
     // ---- Easy mode: a grid of bets ----
     // Columns run from one listed expiry to the next; rows are bands between listed strikes on
-    // that expiry (merged until tall enough to tap), so boxes differ in size. Each box is one bet:
+    // that expiry (merged outwards from the money until tall enough to tap), so boxes differ in size. Each box is one bet:
     // above the index, "ends above this band"; below it, "ends below". It shows its preview share
     // price: what a share is expected to cost at most by RFQ.
     let easyInfo: { q: BetQuote; box: EasyBox } | null = null;
@@ -1410,19 +1410,22 @@ export function Chart(props: Props) {
           if (x <= nowX + 4) continue;
           if (x - lastX < 34) continue;
           const ks = market.strikes(e.ts).filter((k) => k > 0);
-          // Start from the highest strike at or below the bottom edge, end at the first one at or above the top.
-          let start = 0;
-          ks.forEach((k, i) => {
-            if (pToY(k) >= plotB) start = i;
-          });
-          const edges: number[] = [];
-          for (const k of ks.slice(start)) {
-            const y = pToY(k);
-            if (!edges.length || pToY(edges[edges.length - 1]) - y >= 22) {
-              edges.push(k);
-              if (y <= plotT) break;
-            }
+          if (!ks.length) continue;
+          // Edges are laid out from the strike nearest the money, outwards (merging strikes until a
+          // box is tall enough to tap), so "below" bets end and "above" bets start at the money,
+          // wherever the view is panned. Each side runs to the first strike past the plot's edge.
+          const atm = ks.reduce((a, k) => (Math.abs(k - spot) < Math.abs(a - spot) ? k : a), ks[0]);
+          const up = [atm];
+          for (const k of ks.filter((k) => k > atm)) {
+            if (pToY(up[up.length - 1]) <= plotT) break;
+            if (pToY(up[up.length - 1]) - pToY(k) >= 22) up.push(k);
           }
+          const down = [atm];
+          for (const k of ks.filter((k) => k < atm).reverse()) {
+            if (pToY(down[down.length - 1]) >= plotB) break;
+            if (pToY(k) - pToY(down[down.length - 1]) >= 22) down.push(k);
+          }
+          const edges = [...down.reverse(), ...up.slice(1)];
           for (let i = 0; i + 1 < edges.length; i++) {
             const q = easy.quote(e.ts, edges[i], edges[i + 1]);
             if (q) boxes.push({ expiry: e.ts, lo: edges[i], hi: edges[i + 1], x0: lastX, x1: x, q });

@@ -62,7 +62,7 @@ const PRICER = `(() => {
   };
 })()`;
 
-// [asset, horizon days, which column (fraction), target chance, stake]
+// [asset, horizon days, which column (fraction), target chance, stake, vertical pan (fraction of the view)]
 const cases = [
   ['ETH', 21, 0.5, 0.2, 20],
   ['ETH', 21, 0.2, 0.3, 50],
@@ -74,9 +74,12 @@ const cases = [
   ['SOL', 21, 0.5, 0.3, 30],
   ['ADA', 60, 0.6, 0.2, 25],
   ['PUMP', 60, 0.6, 0.25, 40],
+  // Panned up and down: the money stays a box edge.
+  ['ETH', 21, 0.5, 0.2, 20, 0.13],
+  ['ETH', 60, 0.5, 0.2, 20, -0.21],
 ];
 let failed = 0;
-for (const [asset, horizon, colFrac, chance, stake] of cases) {
+for (const [asset, horizon, colFrac, chance, stake, pan = 0] of cases) {
   const failures = [];
   const fail = (m) => failures.push(m);
   // Pick the market with the header's search, as a user would.
@@ -84,7 +87,7 @@ for (const [asset, horizon, colFrac, chance, stake] of cases) {
   await page.fill('.asset-search input', asset.toLowerCase());
   await page.keyboard.press('Enter');
   await page.waitForFunction((a) => window.__chart?.asset === a, asset);
-  await page.evaluate((h) => window.__ticket.setView({ horizon: h * 864e5, yZoom: 1, yShift: 0 }), horizon);
+  await page.evaluate(([h, pan]) => window.__ticket.setView({ horizon: h * 864e5, yZoom: 1, yShift: pan }), [horizon, pan]);
   await page.waitForTimeout(300);
   await page.mouse.move(1430, 850);
   await page.waitForTimeout(100);
@@ -127,6 +130,12 @@ for (const [asset, horizon, colFrac, chance, stake] of cases) {
     for (const e of cols) {
       const inCol = boxes.filter((b) => b.expiry === e);
       const ks = window.__ticket.strikes(asset, e);
+      // At the money: "below" boxes end and "above" boxes start at the strike nearest the index.
+      const atm = ks.reduce((a, k) => (Math.abs(k - K.spot) < Math.abs(a - K.spot) ? k : a), ks[0]);
+      const split = inCol.find((b) => b.lo === atm) && inCol.find((b) => b.hi === atm);
+      if (K.pToY(atm) > G.plotT && K.pToY(atm) < G.plotB && !split) out.push(`column ${new Date(e).toISOString().slice(5, 10)} has no box edge at ${atm}, the strike nearest the index ${K.spot.toFixed(2)}`);
+      const wrong = inCol.find((b) => (b.lo >= atm ? 'above' : 'below') !== b.dir);
+      if (wrong) out.push(`column ${new Date(e).toISOString().slice(5, 10)}: box ${wrong.lo}/${wrong.hi} is "${wrong.dir}" on the wrong side of the money (${atm})`);
       const top = Math.min(...inCol.map((b) => b.y0)), bottom = Math.max(...inCol.map((b) => b.y1));
       if (top > G.plotT + 0.5 && K.pToY(ks[ks.length - 1]) <= G.plotT) out.push(`column ${new Date(e).toISOString().slice(5, 10)} stops at y=${top.toFixed(0)}, below the top edge, though strikes go higher`);
       if (bottom < G.plotB - 0.5 && K.pToY(ks[0]) >= G.plotB) out.push(`column ${new Date(e).toISOString().slice(5, 10)} stops at y=${bottom.toFixed(0)}, above the bottom edge, though strikes go lower`);
