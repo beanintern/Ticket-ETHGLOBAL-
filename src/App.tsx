@@ -12,6 +12,7 @@ import { betsFromHeld } from './lib/bets';
 import { EasyPanel, sellEstimate } from './components/EasyPanel';
 import { AssetPicker } from './components/AssetPicker';
 import { TickFlash } from './components/TickFlash';
+import { ModeChooser } from './components/ModeChooser';
 import { Sidebar } from './components/Sidebar';
 import type { OptType } from './lib/bs';
 import { bsPrice } from './lib/bs';
@@ -254,6 +255,25 @@ export default function App() {
       /* not remembered */
     }
   };
+  // First visit (nothing remembered, no ?mode=): ask which to start in. Not in automated checks.
+  const [askMode, setAskMode] = useState(() => {
+    if (new URLSearchParams(location.search).has('mode')) return false;
+    if ((window as unknown as { __TICKET_TEST__?: boolean }).__TICKET_TEST__) return false;
+    try {
+      return localStorage.getItem('ticket.mode') === null;
+    } catch {
+      return false;
+    }
+  });
+  const chooseMode = useCallback((m: 'easy' | 'pro') => {
+    setAskMode(false);
+    setModeState(m);
+    try {
+      localStorage.setItem('ticket.mode', m);
+    } catch {
+      /* asked again next visit */
+    }
+  }, []);
   const easy = mode === 'easy';
   const [pick, setPick] = useState<{ asset: Asset; expiry: number; lo: number; hi: number } | null>(null);
   const [stake, setStake] = useState(20);
@@ -870,6 +890,7 @@ export default function App() {
         <SourceSwitch source={source} />
         {net && <AccountButton info={NETS[net]} account={accountState} onOpen={() => setAccountOpen(true)} />}
       </header>
+      {askMode && <ModeChooser onChoose={chooseMode} />}
       {accountOpen && (
         <AccountPanel
           info={NETS[net!]}
