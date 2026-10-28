@@ -900,6 +900,9 @@ export function Chart(props: Props) {
                 const i1 = nearestIn(cs, p1[1]);
                 const i2 = nearestIn(cs, p2[1]);
                 if (i1 < 0 || i2 < 0 || i1 === i2) break;
+                // Past the tip the pair is gone: don't jump to another band's crossings.
+                const reach = Math.max(hc * 2, Math.abs(p2[1] - p1[1]));
+                if (Math.abs(cs[i1] - p1[1]) > reach || Math.abs(cs[i2] - p2[1]) > reach) break;
                 const x = tToX(t);
                 seg(p1[0], p1[1], x, cs[i1]);
                 seg(p2[0], p2[1], x, cs[i2]);
