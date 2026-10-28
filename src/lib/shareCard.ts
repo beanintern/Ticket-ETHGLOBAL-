@@ -136,8 +136,9 @@ export async function drawShareCard(canvas: HTMLCanvasElement, d: ShareData, o: 
   ctx.fillText(multipleText(d.multiple), 66, 300);
   // 2. The price target.
   ctx.fillStyle = '#f2f4f8';
-  fitFont(ctx, targetText(d), 700, 62, SANS, 620);
-  ctx.fillText(targetText(d), 72, 384);
+  const target = `If ${targetText(d)}`;
+  fitFont(ctx, target, 700, 62, SANS, 620);
+  ctx.fillText(target, 72, 384);
   // 3. The date.
   ctx.fillStyle = '#93a0b4';
   ctx.font = `500 32px ${SANS}`;
