@@ -171,7 +171,7 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
 - **Positions tab**. Paper fills with live P&L, a P&L sparkline since entry, progress toward
   max profit, and close. Stored per data source in the browser.
 - **First visit** (`src/components/ModeChooser.tsx`): a dialog asks Easy or Pro, remembered in
-  the browser; `?mode=easy|pro` skips it. Escape keeps Pro.
+  the browser; `?mode=easy|pro` skips it. Easy is marked recommended, and Escape picks it.
 - **Easy mode** (`src/lib/binary.ts`, `src/components/EasyPanel.tsx`). The header's Easy / Pro
   switch (or `?mode=easy`) turns the chart into a betting grid, in the style of Euphoria. Columns
   run from one listed expiry to the next; rows are bands between listed strikes on that expiry

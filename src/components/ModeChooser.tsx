@@ -10,8 +10,8 @@ export function ModeChooser({ onChoose }: { onChoose: (m: Mode) => void }) {
   const first = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     first.current?.focus();
-    // Escape keeps the default (Pro) and doesn't ask again.
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && onChoose('pro');
+    // Escape takes the recommended start (Easy) and doesn't ask again.
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && onChoose('easy');
     window.addEventListener('keydown', esc);
     return () => window.removeEventListener('keydown', esc);
   }, [onChoose]);
@@ -31,7 +31,9 @@ export function ModeChooser({ onChoose }: { onChoose: (m: Mode) => void }) {
               <span className="down">1.9×</span>
               <span className="down">3.8×</span>
             </div>
-            <b>Easy</b>
+            <b>
+              Easy <span className="mode-rec">Recommended</span>
+            </b>
             <span>Tap where you think the price will be. See what you'd profit and your chance, then buy in one tap.</span>
           </button>
           <button className="mode-option" onClick={() => onChoose('pro')}>
