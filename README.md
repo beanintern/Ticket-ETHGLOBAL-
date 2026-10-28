@@ -28,7 +28,19 @@ changing them.
 - `railway.json` sets the build (`npm run build`), start (`npm start`) and health check
   (`/healthz`).
 - `npm start` runs `server.mjs`, a dependency-free static server for `dist/` on `$PORT`, with
-  long-lived caching for fingerprinted assets and a single-page-app fallback.
+  long-lived caching for fingerprinted assets and a single-page-app fallback. Every response
+  carries security headers: a Content-Security-Policy (scripts only from this site, connections
+  only to `*.derive.xyz`, no framing), HSTS, and `X-Frame-Options: DENY`. A new third-party host
+  (an analytics script, an RPC) has to be added to `CSP` in `server.mjs`.
+- If Derive is down or slow, the page retries by itself (2s, then doubling up to 30s) and carries
+  on when Derive answers; requests time out after 20s. A rendering error shows a crash screen
+  with Reload instead of a blank page.
+- If executing a trade times out (Derive's code 9000, "Order confirmation timeout"), the app
+  looks for it in the subaccount's trade history before saying anything: it may have filled.
+  If it can't tell, it says so and asks the user to check positions rather than retry.
+- GitHub Actions (`.github/workflows/checks.yml`) runs the build, `check:chart` and `check:easy`
+  on every push. To stop a red build deploying, turn on **Wait for CI** in the Railway service's
+  settings.
 - The deployed app defaults to live Derive data: each visitor's browser connects to Derive's
   WebSocket directly, so the server only serves files. Add `?source=mock` for demo data, or set
   `VITE_SOURCE=mock` as a build variable to make demo the default.
@@ -153,7 +165,7 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
 - **Easy mode** (`src/lib/binary.ts`, `src/components/EasyPanel.tsx`). The header's Easy / Pro
   switch (or `?mode=easy`) turns the chart into a betting grid, in the style of Euphoria. Columns
   run from one listed expiry to the next; rows are bands between listed strikes on that expiry
-  (merged until they're tall enough to tap), so boxes differ in size: near-dated strikes are
+  (merged outwards from the strike nearest the index until they're tall enough to tap, so below the money every box is a put spread and above it a call spread), so boxes differ in size: near-dated strikes are
   finer. Every box even partly on screen is built (the column running off the right edge, the
   bands crossing the top and bottom), labelled in its visible part, so none pop in while panning.
   Each box is one bet: above the index, "ends above this band on that date"; below it, "ends
