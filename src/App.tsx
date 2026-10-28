@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { DeriveAccount, loadCredentials, type AccountState, type Credentials, type OrderResult, type Portfolio, type RfqFill, type RfqQuote } from './account/derive';
 import { NETS, type DeriveNet } from './account/network';
 import { forgetSessionKey, hasMetaMask, metaMaskSigner, registerSessionKey, savedSessionKey } from './account/metamask';
@@ -238,6 +239,23 @@ export default function App() {
   const [closed, setClosed] = useState<ClosedPosition[]>(() => loadStore(source.kind)?.closed ?? []);
   const [focus, setFocus] = useState<Focus>({ kind: 'builder' });
   const [tab, setTab] = useState<'build' | 'positions'>('build');
+  /**
+   * Easy ⇄ Pro: the workspace crossfades (a View Transition, where the browser has them; else the
+   * new view fades in). Off when animations are.
+   */
+  const withModeFade = (apply: () => void) => {
+    const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
+    if (reduceMotion()) return apply();
+    if (doc.startViewTransition) {
+      doc.startViewTransition(() => flushSync(apply));
+      return;
+    }
+    apply();
+    const w = document.querySelector('.workspace');
+    w?.classList.remove('mode-fade');
+    void (w as HTMLElement | null)?.offsetWidth;
+    w?.classList.add('mode-fade');
+  };
   // Easy mode: prediction-market style Yes bets instead of the full options ticket.
   const [mode, setModeState] = useState<'easy' | 'pro'>(() => {
     const q = new URLSearchParams(location.search).get('mode');
@@ -249,7 +267,8 @@ export default function App() {
     }
   });
   const setMode = (m: 'easy' | 'pro') => {
-    setModeState(m);
+    if (m === mode) return;
+    withModeFade(() => setModeState(m));
     try {
       localStorage.setItem('ticket.mode', m);
     } catch {
@@ -267,8 +286,10 @@ export default function App() {
     }
   });
   const chooseMode = useCallback((m: 'easy' | 'pro') => {
-    setAskMode(false);
-    setModeState(m);
+    withModeFade(() => {
+      setAskMode(false);
+      setModeState(m);
+    });
     try {
       localStorage.setItem('ticket.mode', m);
     } catch {
