@@ -21,6 +21,25 @@ const QUOTE_REFRESH_MS = 10_000;
 const ASSETS_REFRESH_MS = 15_000;
 /** An asset counts as in use (keeps its quotes fresh) this long after it was last looked at. */
 const IN_USE_MS = 60_000;
+/** A request Derive hasn't answered in this long (including waiting to connect) fails. */
+const REQUEST_TIMEOUT_MS = 20_000;
+/** Retrying a failed load: the wait doubles from the first to the last. */
+const RETRY_FIRST_MS = 2_000;
+const RETRY_MAX_MS = 30_000;
+const backoff = (fails: number) => Math.min(RETRY_MAX_MS, RETRY_FIRST_MS * 2 ** Math.max(0, fails - 1));
+
+/** Derive's error (a JSON-RPC error object as text) in words: its message, not the JSON. */
+export function deriveErrorText(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  try {
+    const j = JSON.parse(msg) as { message?: string; data?: unknown };
+    const data = typeof j.data === 'string' && j.data !== j.message ? `: ${j.data}` : '';
+    if (j.message) return `${j.message}${data}`;
+  } catch {
+    /* not JSON */
+  }
+  return msg;
+}
 
 type Json = Record<string, unknown>;
 
@@ -49,7 +68,12 @@ class DeriveSocket {
       this.onState('open');
     };
     ws.onmessage = (ev) => {
-      const msg = JSON.parse(String(ev.data)) as Json;
+      let msg: Json;
+      try {
+        msg = JSON.parse(String(ev.data)) as Json;
+      } catch {
+        return;
+      }
       if (msg.method === 'subscription') {
         const p = msg.params as { channel: string; data: Json };
         this.channels.get(p.channel)?.(p.data);
@@ -82,20 +106,29 @@ class DeriveSocket {
     return id;
   }
 
+  /** A request; fails if Derive doesn't answer within REQUEST_TIMEOUT_MS, so a stalled exchange can't hang a load. */
   call<T>(method: string, params: Json): Promise<T> {
     return new Promise<T>((resolve, reject) => {
+      let id = 0;
+      let wait: ReturnType<typeof setInterval> | undefined;
+      const timeout = setTimeout(() => {
+        clearInterval(wait);
+        if (id) this.pending.delete(id);
+        reject(new Error(`Derive didn't answer in time (${method})`));
+      }, REQUEST_TIMEOUT_MS);
+      const done = { resolve: (v: unknown) => (clearTimeout(timeout), resolve(v as T)), reject: (e: Error) => (clearTimeout(timeout), reject(e)) };
       const go = () => {
-        const id = this.send(method, params);
-        this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+        id = this.send(method, params);
+        this.pending.set(id, done);
       };
       if (this.ws?.readyState === WebSocket.OPEN) go();
       else {
-        const t = setInterval(() => {
+        wait = setInterval(() => {
           if (this.closed) {
-            clearInterval(t);
-            reject(new Error('closed'));
+            clearInterval(wait);
+            done.reject(new Error('closed'));
           } else if (this.ws?.readyState === WebSocket.OPEN) {
-            clearInterval(t);
+            clearInterval(wait);
             go();
           }
         }, 100);
@@ -157,6 +190,9 @@ interface LiveState {
   /** Load started; finished once candles and expiries are in. */
   loading: boolean;
   loaded: boolean;
+  /** Failed loads in a row, and when the next try may start. */
+  fails: number;
+  retryAt: number;
   lastUsed: number;
   spot: number;
   candles: Candle[];
@@ -245,7 +281,7 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
     let st = states.get(asset);
     if (!st) {
       const spec = specFor(asset, assets.find((a) => a.asset === asset)?.spot);
-      st = { spec, rules: { tick: spec.tick, minAmount: spec.minAmount, amountStep: spec.amountStep }, loading: false, loaded: false, lastUsed: Date.now(), spot: 0, candles: [], expiries: [], strikesByExpiry: new Map(), quotes: new Map() };
+      st = { spec, rules: { tick: spec.tick, minAmount: spec.minAmount, amountStep: spec.amountStep }, loading: false, loaded: false, fails: 0, retryAt: 0, lastUsed: Date.now(), spot: 0, candles: [], expiries: [], strikesByExpiry: new Map(), quotes: new Map() };
       states.set(asset, st);
     }
     return st;
@@ -256,7 +292,7 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
       const st = stateOf(asset);
       m = liveMarket(asset, st, () => {
         st.lastUsed = Date.now();
-        if (!st.loading) void loadAsset(asset);
+        if (!st.loading && Date.now() >= st.retryAt) void loadAsset(asset);
       });
       made.set(asset, m);
     }
@@ -269,10 +305,17 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
     getOwnPropertyDescriptor: (_t, a) => (typeof a === 'string' ? { enumerable: true, configurable: true, value: marketOf(a) } : undefined),
   });
 
-  const source: MarketSource & { status: MarketSource['status']; error: string | null } = {
+  // The connection's problem (lost, reconnecting) comes first, then a failed load's.
+  let socketError: string | null = null;
+  let loadError: string | null = null;
+  const loadErrors = new Map<Asset, string>();
+  const setLoadError = () => (loadError = loadErrors.size ? [...loadErrors.values()][0] : null);
+  const source: MarketSource & { status: MarketSource['status'] } = {
     kind: network.kind,
     status: 'connecting',
-    error: null,
+    get error() {
+      return socketError ?? loadError;
+    },
     get assets() {
       return assets;
     },
@@ -285,13 +328,13 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
       closed = true;
       clearInterval(refreshTimer);
       clearInterval(assetsTimer);
+      clearTimeout(startTimer);
       sock.close();
     },
   };
   let closed = false;
   sock.onState = (s, err) => {
-    if (s === 'closed') source.error = err ?? 'Disconnected';
-    else if (source.status !== 'error') source.error = null;
+    socketError = s === 'closed' ? (err ?? 'Disconnected') : null;
     notify();
   };
 
@@ -419,11 +462,17 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
       });
       await loadAllQuotes(asset);
       st.loaded = true;
+      st.fails = 0;
+      loadErrors.delete(asset);
+      setLoadError();
       notify();
     } catch (e) {
-      // Let the next use try again.
+      // Let a later use try again, waiting longer after each failure so an outage isn't hammered.
       st.loading = false;
-      source.error = `Couldn't load ${asset} from Derive: ${(e as Error).message}`;
+      st.fails++;
+      st.retryAt = Date.now() + backoff(st.fails);
+      loadErrors.set(asset, `Couldn't load ${asset} from Derive (${deriveErrorText(e)}). Retrying…`);
+      setLoadError();
       notify();
     }
   }
@@ -475,33 +524,50 @@ export function createDeriveSource(network: DeriveNetwork = DERIVE_MAINNET): Mar
       .sort((a, b) => rank(a.asset) - rank(b.asset) || a.asset.localeCompare(b.asset));
   }
 
+  // One refresh at a time: when Derive is slow, a refresh can take longer than the interval.
+  let refreshing = false;
   async function refreshInUse() {
-    const now = Date.now();
-    for (const [a, st] of states) {
-      if (closed) return;
-      if (st.loaded && now - st.lastUsed < IN_USE_MS) {
-        await loadAllQuotes(a);
-        notify();
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      const now = Date.now();
+      for (const [a, st] of states) {
+        if (closed) return;
+        if (st.loaded && now - st.lastUsed < IN_USE_MS) {
+          await loadAllQuotes(a);
+          notify();
+        }
       }
+    } finally {
+      refreshing = false;
     }
   }
 
   let refreshTimer = 0 as unknown as ReturnType<typeof setInterval>;
   let assetsTimer = 0 as unknown as ReturnType<typeof setInterval>;
-  (async () => {
+  let startTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+  // The first load retries until it works (with a growing wait), so a Derive outage clears by itself.
+  const start = async (fails: number) => {
     try {
       await loadAssets();
+      if (closed) return;
       source.status = 'ready';
-      source.error = null;
+      loadErrors.delete('*');
+      setLoadError();
       notify();
       refreshTimer = setInterval(() => void refreshInUse(), QUOTE_REFRESH_MS);
       assetsTimer = setInterval(() => void loadAssets().then(notify, () => {}), ASSETS_REFRESH_MS);
     } catch (e) {
+      if (closed) return;
+      const wait = backoff(fails + 1);
       source.status = 'error';
-      source.error = `Couldn't load Derive market data: ${(e as Error).message}`;
+      loadErrors.set('*', `Derive said: ${deriveErrorText(e)}. Retrying in ${Math.round(wait / 1000)}s…`);
+      setLoadError();
       notify();
+      startTimer = setTimeout(() => void start(fails + 1), wait);
     }
-  })();
+  };
+  void start(0);
 
   return source;
 }

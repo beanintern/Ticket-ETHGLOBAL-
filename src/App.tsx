@@ -777,11 +777,12 @@ export default function App() {
         </div>
         {source.status === 'error' || slow || source.error ? (
           <>
-            <p>{source.status === 'error' ? 'Couldn’t load Derive market data.' : 'Still connecting to Derive…'}</p>
+            <p>{source.status === 'error' ? 'Derive isn’t responding right now. Retrying automatically…' : 'Still connecting to Derive…'}</p>
             {source.error && <p className="loading-error">{source.error}</p>}
             <p className="fine">
-              If this doesn’t clear, something between you and Derive may be blocking it: a VPN, firewall, ad blocker, or a region Derive doesn’t
-              serve.
+              {source.status === 'error'
+                ? 'This is usually a short outage on Derive’s side: the page carries on by itself once Derive is back. Check status.derive.xyz if it lasts.'
+                : 'If this doesn’t clear, something between you and Derive may be blocking it: a VPN, firewall, ad blocker, or a region Derive doesn’t serve.'}
             </p>
             <a href="?source=mock">Use demo data instead</a>
           </>
