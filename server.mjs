@@ -39,10 +39,36 @@ async function fileFor(pathname) {
   return null;
 }
 
+// Security headers for every response. The app holds a Derive session key and asks the wallet to
+// sign, so: scripts only from this site, connections only to Derive, and no framing (clickjacking).
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  // React sets inline styles; Google Fonts serves the stylesheet and font files.
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "img-src 'self' data: blob:",
+  // Market data and the account go to Derive over its WebSocket (and HTTPS API).
+  "connect-src 'self' wss://*.derive.xyz https://*.derive.xyz",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "object-src 'none'",
+].join('; ');
+const SECURITY = {
+  'content-security-policy': CSP,
+  'strict-transport-security': 'max-age=31536000; includeSubDomains',
+  'x-frame-options': 'DENY',
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+  'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+  'cross-origin-opener-policy': 'same-origin-allow-popups',
+};
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   if (url.pathname === '/healthz') {
-    res.writeHead(200, { 'content-type': 'text/plain' }).end('ok');
+    res.writeHead(200, { 'content-type': 'text/plain', ...SECURITY }).end('ok');
     return;
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -61,8 +87,7 @@ const server = createServer(async (req, res) => {
     'content-length': file.size,
     // Vite fingerprints files in assets/, so they can be cached forever; index.html must not be.
     'cache-control': hashed ? 'public, max-age=31536000, immutable' : 'no-cache',
-    'x-content-type-options': 'nosniff',
-    'referrer-policy': 'strict-origin-when-cross-origin',
+    ...SECURITY,
   });
   if (req.method === 'HEAD') res.end();
   else createReadStream(file.full).pipe(res);
