@@ -157,7 +157,9 @@ npm run check:easy    # Easy mode grid: boxes, share prices vs independent prici
   tips and exits through the plot edge are refined, so the outline meets the expiry at the right
   price. The strip next to the price axis shows P&L across price at the first
   expiry, or at the time under the cursor.
-- **Live chart**. The chart moves as Derive's index ticks (every few seconds): the price line,
+- **Live chart**. Price history is drawn in colour, green and red candles over a wash that's green
+  or red with the price's direction over the visible history, and the candle still forming glows,
+  brighter just after each tick. The chart moves as Derive's index ticks (every few seconds): the price line,
   dot and label glide to each new price rather than jumping, the label flashes green or red with
   the tick, the dot pulses, and the latest candle grows in place. History mixes daily, hourly,
   5-minute (last day) and 1-minute (last 6 hours) candles, and live ticks build 1-minute candles,

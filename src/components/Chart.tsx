@@ -94,8 +94,9 @@ const C = {
   text: '#e3e7ee',
   muted: '#8390a3',
   dim: '#566174',
-  candleUp: '#a9b4c7',
-  candleDown: '#566174',
+  // Price history, in exchange colours: a touch apart from the P&L map's green and red.
+  candleUp: [38, 194, 133] as const,
+  candleDown: [240, 78, 96] as const,
   long: '#6fa8ff',
   short: '#f0a94b',
   profit: [46, 201, 139] as const,
@@ -649,21 +650,29 @@ export function Chart(props: Props) {
     // A candle covers `span` ms: the bucket, or longer when the history itself is coarser there
     // (older history is daily), so a daily candle is never drawn as a thin sliver with gaps.
     let agg: (Candle & { span: number }) | null = null;
-    const flush = (cd: Candle & { span: number }) => {
+    // Collected first, so the wash under the price can go down before the candles.
+    const toDraw: { cd: Candle & { span: number }; forming: boolean }[] = [];
+    const flush = (cd: Candle & { span: number }, forming = false) => toDraw.push({ cd, forming });
+    const drawCandle = (cd: Candle & { span: number }, forming: boolean) => {
       const x = tToX(cd.t + cd.span / 2);
       const bodyW = Math.max(1, (cd.span / DAY) * pxPerDay * 0.62);
-      const up = cd.c >= cd.o;
-      ctx.strokeStyle = up ? C.candleUp : C.candleDown;
-      ctx.fillStyle = up ? C.bg : C.candleDown;
+      const rgb = (cd.c >= cd.o ? C.candleUp : C.candleDown).join(',');
+      ctx.save();
+      // The candle still forming glows, a little more right after each tick.
+      if (forming && !REDUCED_MOTION) {
+        ctx.shadowColor = `rgba(${rgb},0.9)`;
+        ctx.shadowBlur = 6 + 12 * flash;
+      }
+      ctx.strokeStyle = `rgba(${rgb},${forming ? 1 : 0.8})`;
+      ctx.fillStyle = `rgba(${rgb},${forming ? 1 : 0.72})`;
       ctx.beginPath();
       ctx.moveTo(Math.round(x) + 0.5, pToY(cd.h));
       ctx.lineTo(Math.round(x) + 0.5, pToY(cd.l));
       ctx.stroke();
       const y1 = pToY(Math.max(cd.o, cd.c));
       const y2 = pToY(Math.min(cd.o, cd.c));
-      const bh = Math.max(1, y2 - y1);
-      ctx.fillRect(x - bodyW / 2, y1, bodyW, bh);
-      if (up && bodyW > 2) ctx.strokeRect(x - bodyW / 2 + 0.5, y1 + 0.5, bodyW - 1, Math.max(0, bh - 1));
+      ctx.fillRect(x - bodyW / 2, y1, bodyW, Math.max(1, y2 - y1));
+      ctx.restore();
     };
     const lastI = candles.length - 1;
     for (let i = i0; i < candles.length; i++) {
@@ -681,7 +690,26 @@ export function Chart(props: Props) {
         agg.c = cd.c;
       }
     }
-    if (agg) flush(agg);
+    if (agg) flush(agg, true);
+    // Under the candles: a soft wash below the closing price, green if the price is up over the
+    // visible history, red if down, so the history reads at a glance.
+    if (toDraw.length > 1) {
+      const closes = toDraw.map(({ cd }) => [tToX(cd.t + cd.span / 2), pToY(cd.c)]);
+      const first = toDraw[0].cd.o;
+      const rgb = (shownSpot >= first ? C.candleUp : C.candleDown).join(',');
+      const grad = ctx.createLinearGradient(0, plotT, 0, plotB);
+      grad.addColorStop(0, `rgba(${rgb},0.16)`);
+      grad.addColorStop(1, `rgba(${rgb},0)`);
+      ctx.beginPath();
+      ctx.moveTo(closes[0][0], plotB);
+      for (const [x, y] of closes) ctx.lineTo(x, y);
+      ctx.lineTo(nowX, pToY(shownSpot));
+      ctx.lineTo(nowX, plotB);
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+    }
+    for (const { cd, forming } of toDraw) drawCandle(cd, forming);
     ctx.restore();
 
     // ---- Now line + spot ----
